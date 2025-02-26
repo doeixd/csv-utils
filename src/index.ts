@@ -13,6 +13,11 @@ import {  get as lodashGet} from 'lodash';
 import { createHeaderMapFns, HeaderMap, RetryOptions } from './headers'
 import { Readable, Transform } from 'unenv/runtime/node/stream/index';
 import { type Transform as NodeTransform } from 'node:stream'
+
+export * from './headers'
+
+export * from './standalone'
+
 /**
  * Error class for CSV-related operations
  */
