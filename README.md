@@ -323,7 +323,7 @@ const mergedInventory = localInventory.mergeWith(
 mergedInventory.writeToFile('combined_inventory.csv');
 ```
 
-### Advanced Data Analysis
+### Simple Data Analysis
 
 ```typescript
 import CSV from '@doeixd/csv-utils';
