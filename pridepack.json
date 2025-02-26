@@ -1,0 +1,8 @@
+{
+  "target": "es2018",
+  "entrypoints": {
+    ".": "src/index.ts",
+    "./headers": "src/headers.ts",
+    "./standalone": "src/standalone"
+  }
+}
