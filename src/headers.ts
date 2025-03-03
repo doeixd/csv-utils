@@ -170,6 +170,7 @@ export function createHeaderMapFns<To extends Record<string, any>, RowArr extend
  * @param data - Array of arrays or objects to transform
  * @param headerMap - Mapping between array indices or header names and object properties
  * @param headerRow - Optional header row for object input (if headerMap uses header names)
+ * @param mergeFn - Optional function to customize how values are merged into the target object
  * @returns Array of structured objects
  * @example
  * ```typescript
@@ -188,12 +189,26 @@ export function createHeaderMapFns<To extends Record<string, any>, RowArr extend
  *   csvData.slice(1), // Skip header row
  *   { 0: 'id', 1: 'details.name', 2: 'details.price' }
  * );
+ * 
+ *  // With custom merge function to convert price to number
+ * const productsWithPriceAsNumber = arrayToObjArray<Product>(
+ *   csvData.slice(1),
+ *   { 0: 'id', 1: 'details.name', 2: 'details.price' },
+ *   undefined,
+ *   (obj, key, value) => {
+ *     if (key === 'details.price') {
+ *       return parseFloat(value);
+ *     }
+ *     return value;
+ *   }
+ * );
  * ```
  */
 export function arrayToObjArray<T extends Record<string, any>>(
   data: any[],
   headerMap: HeaderMap<T>,
-  headerRow?: string[]
+  headerRow?: string[],
+  mergeFn?: (obj: Partial<T>, key: string, value: any) => any
 ): T[] {
   if (!Array.isArray(data)) {
     throw new CSVError('Data must be an array');
@@ -213,7 +228,37 @@ export function arrayToObjArray<T extends Record<string, any>>(
   if (isArrayData && hasStringKeys && !headerRow) {
     throw new CSVError('Header row is required for string-keyed header map with array data');
   }
-  
+
+  if (mergeFn) {
+    return data.map(row => {
+      // Convert row to an object if working with arrays and string header maps
+      let objRow: Record<string, any> = {};
+      if (isArrayData && hasStringKeys && headerRow) {
+        for (let i = 0; i < row.length && i < headerRow.length; i++) {
+          objRow[headerRow[i]] = row[i];
+        }
+      } else if (isArrayData) {
+        // For array data with numeric indices
+        objRow = [...row];
+      } else {
+        // For object data
+        objRow = {...row};
+      }
+      
+      // Apply mappings with custom merge function
+      const result = {} as T;
+      for (const [sourceKey, targetPath] of Object.entries(headerMap)) {
+        const key = isArrayData && !hasStringKeys ? parseInt(sourceKey) : sourceKey;
+        const value = isArrayData ? row[key as number] : objRow[key as string];
+        if (value !== undefined) {
+          const processedValue = mergeFn(result, targetPath as string, value);
+          setPath(result, targetPath as string, processedValue);
+        }
+      }
+      return result;
+    });
+  }
+
   return data.map(row => {
     // If working with arrays and string header maps, convert to object first
     if (isArrayData && hasStringKeys && headerRow) {
