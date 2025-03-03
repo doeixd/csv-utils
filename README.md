@@ -14,8 +14,8 @@ A TypeScript library for CSV manipulation with strong typing. This library provi
 - **⚡ Async Support** - Process large files with generators and streams
 - **🛡️ Error Handling** - Robust error recovery with retry mechanisms
 - **📝 Documentation** - Extensive examples and API documentation
-- **🚀 Builder Patter** - Chain methods for elegant data manipulation
-- 
+- **🚀 Builder Pattern** - Chain methods for elegant data manipulation
+  
 ## Installation
 
 ```bash
