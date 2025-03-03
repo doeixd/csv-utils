@@ -434,8 +434,6 @@ const processProducts = pipe(
   products => sortBy(products, 'price')                       // Sort by price
 );
 ```
-
-
 ## API Documentation
 
 ### Core Class: CSV
@@ -528,8 +526,8 @@ const processProducts = pipe(
 
 | Function | Description |
 |----------|-------------|
-| `arrayToObjArray(data, headerMap, headerRow?)` | Transform arrays to objects |
-| `objArrayToArray(data, headerMap, headers?, includeHeaders?)` | Transform objects to arrays |
+| `arrayToObjArray(data, headerMap, headerRow?, mergeFn?)` | Transform arrays to objects with optional value transformation |
+| `objArrayToArray(data, headerMap, headers?, includeHeaders?, transformFn?)` | Transform objects to arrays with optional value transformation |
 | `groupByField(data, field)` | Group objects by a field value |
 
 #### Generator Functions
@@ -544,7 +542,18 @@ const processProducts = pipe(
 
 | Function | Description |
 |----------|-------------|
-| `createHeaderMapFns(headerMap)` | Create functions for mapping between row arrays and objects |
+| `createHeaderMapFns(headerMap, mergeFn?)` | Create functions for mapping between row arrays and objects with optional value transformation |
+
+## Types and Interfaces
+
+### MergeFn
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `obj` | `Partial<T>` | The partially constructed target object |
+| `key` | `string` | The target path where the value will be stored (e.g., 'profile.firstName') |
+| `value` | `any` | The original value from the source data |
+| **returns** | `any` | The transformed value to be stored in the target object |
 
 ## Options Interfaces
 
@@ -556,6 +565,7 @@ const processProducts = pipe(
 | `csvOptions` | Object | CSV parsing options |
 | `transform` | Function | Function to transform raw content |
 | `headerMap` | HeaderMap | Header mapping configuration |
+| `mergeFn` | MergeFn | Function to customize value transformations during mapping |
 | `retry` | RetryOptions | Options for retry logic |
 | `validateData` | boolean | Enable data validation |
 | `allowEmptyValues` | boolean | Allow empty values in the CSV |
@@ -568,6 +578,7 @@ const processProducts = pipe(
 | `stringifyOptions` | Object | Options for stringifying |
 | `streaming` | boolean | Use streaming for large files |
 | `headerMap` | HeaderMap | Header mapping configuration |
+| `transformFn` | Function | Function to transform values during object-to-array conversion |
 | `streamingThreshold` | number | Threshold for using streaming |
 | `retry` | RetryOptions | Options for retry logic |
 
@@ -579,6 +590,7 @@ const processProducts = pipe(
 | `transform` | Function | Function to transform rows |
 | `batchSize` | number | Size of batches (for csvBatchGenerator) |
 | `headerMap` | HeaderMap | Header mapping for transformation |
+| `mergeFn` | MergeFn | Function to customize value transformations during mapping |
 | `retry` | RetryOptions | Options for retry logic |
 | `useBuffering` | boolean | Use buffering for large files |
 | `bufferSize` | number | Size of buffer when useBuffering is true |
