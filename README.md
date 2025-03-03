@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/@doeixd/csv-utils.svg)](https://www.npmjs.com/package/@doeixd/csv-utils)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-A TypeScript library for CSV manipulation with strong typing. This library provides comprehensive utilities for parsing, transforming, analyzing, and writing CSV data with support for complex operations like header mapping, streaming for large files, and async processing.
+A TypeScript library for CSV manipulation with strong typing. This library provides comprehensive utilities for parsing, transforming, analyzing, and writing CSV data / arrays of objects, with support for operations like header mapping, streaming for large files, and async processing.
 
 ## Features
 
