@@ -60,7 +60,7 @@
     "csv": "^6.3.11",
     "fastest-levenshtein": "^1.0.16",
     "lodash": "^4.17.21",
-    "unenv": "^1.10.0"
+    "unenv": "^2.0.0-rc.17"
   },
   "types": "./dist/types/index.d.ts",
   "main": "./dist/cjs/production/index.js",
