@@ -264,7 +264,7 @@ export class CSV<T extends Record<string, any>> {
         // Standard parsing
         parsedData = parseCSV(
           content,
-          options.csvOptions || { columns: true }
+          options.csvOptions ? { columns: true, ...options.csvOptions } : { columns: true }
         ) as T[];
       }
       
