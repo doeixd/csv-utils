@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.0.11](https://github.com/doeixd/csv-utils/compare/v0.0.10...v0.0.11) (2025-05-15)
+
+
+### Features
+
+* :arrow_down: Removed unenv ([a5e53a4](https://github.com/doeixd/csv-utils/commit/a5e53a4885ef721f142309e3928e96f4065c7041))
+
 ### [0.0.10](https://github.com/doeixd/csv-utils/compare/v0.0.9...v0.0.10) (2025-05-15)
 
 ### [0.0.9](https://github.com/doeixd/csv-utils/compare/v0.0.8...v0.0.9) (2025-05-15)
