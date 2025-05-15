@@ -4,14 +4,14 @@
  */
 
 
-import fs from 'unenv/runtime/node/fs/index';
-import path from 'unenv/runtime/node/path/index';
+import fs from 'node:fs';
+import path from 'node:path';
 import { parse as parseCSV, stringify as stringifyCSV } from 'csv/sync';
 import { parse as parseCSVAsync, stringify as stringifyCSVAsync } from 'csv';
 import { distance as levenshteinDistance } from 'fastest-levenshtein';
 import {  get as lodashGet} from 'lodash';
 import { createHeaderMapFns, HeaderMap, RetryOptions } from './headers'
-import { Readable, Transform } from 'unenv/runtime/node/stream/index';
+import { Readable, Transform } from 'node:stream';
 import { type Transform as NodeTransform } from 'node:stream'
 
 export * from './headers'
