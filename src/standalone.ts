@@ -549,7 +549,7 @@ export const arrayTransformations = {
    * @param headerRow - Optional header row
    * @returns Array of structured objects
    */
-  arrayToObjArray: CSVArrayUtils.arrayToObjArray,
+  get arrayToObjArray() { return CSVArrayUtils.arrayToObjArray; },
   
   /**
    * Transform objects to arrays
@@ -559,7 +559,7 @@ export const arrayTransformations = {
    * @param includeHeaders - Whether to include headers
    * @returns Array of arrays
    */
-  objArrayToArray: CSVArrayUtils.objArrayToArray,
+  get objArrayToArray() { return CSVArrayUtils.objArrayToArray; },
   
   /**
    * Group objects by field
@@ -567,7 +567,7 @@ export const arrayTransformations = {
    * @param field - Field to group by
    * @returns Grouped objects
    */
-  groupByField: CSVArrayUtils.groupByField
+  get groupByField() { return CSVArrayUtils.groupByField; }
 };
 
 // Export all the functions as a default object
