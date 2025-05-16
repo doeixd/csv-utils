@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [2.1.0](https://github.com/doeixd/csv-utils/compare/v2.0.1...v2.1.0) (2025-05-16)
+
+
+### Features
+
+* :sparkles: Improved header mapping ([4a42bb6](https://github.com/doeixd/csv-utils/commit/4a42bb60b8871d7c6144fe2a3b0edb602b8b9911))
+
 ### [2.0.1](https://github.com/doeixd/csv-utils/compare/v2.0.0...v2.0.1) (2025-05-16)
 
 ## [2.0.0](https://github.com/doeixd/csv-utils/compare/v0.0.12...v2.0.0) (2025-05-16)
