@@ -10,7 +10,6 @@ A production-ready TypeScript library for CSV manipulation, featuring robust err
 - [Features](#features)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-- [Default Options](#default-options)
 - [Examples](#examples)
   - [Basic Operations](#basic-operations)
   - [Custom Type Casting](#custom-type-casting)
