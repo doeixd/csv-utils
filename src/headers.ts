@@ -6,12 +6,85 @@ import { get as getPath, set as setPath } from 'lodash';
 import { CSVError } from './index';
 
 /**
- * Type for header mapping configurations
- * Maps source fields to target fields with support for nested paths
- * @template T - Optional type for the target object structure
+ * A path string using dot notation to access nested properties
+ * @template T - The target object type
  */
-export type HeaderMap<T = any> = { 
-  [K in string | number]: keyof T & string | string 
+export type Path<T = any> = string;
+
+/**
+ * A function used for custom header mapping operations
+ * @template T - The target object type
+ */
+export type HeaderMapFn<T = any> = (
+  target: T & Record<string, any>, 
+  source: any, 
+  key: string, 
+  headers?: string[]
+) => void;
+
+/**
+ * Configuration for mapping multiple CSV columns to a single array property
+ * @template T - The target object type
+ */
+export interface CsvToArrayConfig<T = any> {
+  /** Type identifier for the mapping configuration */
+  _type: 'csvToTargetArray';
+  
+  /** The target array property path in dot notation */
+  targetPath: Path<T>;
+  
+  /** Option A: Explicit list of CSV column names in order */
+  sourceCsvColumns?: string[];
+  
+  /** Option B: A pattern for matching CSV column names */
+  sourceCsvColumnPattern?: RegExp;
+  
+  /** How to sort columns when using a pattern */
+  sortSourceColumnsBy?: (match: RegExpExecArray, headerName: string) => string | number;
+  
+  /** Filter values before adding to array */
+  filterValue?: (value: any, sourceCsvColumn: string) => boolean;
+  
+  /** How to handle empty values */
+  emptyValueStrategy?: 'skip' | 'pushNullOrUndefined';
+}
+
+/**
+ * Configuration for mapping an array property to multiple CSV columns
+ */
+export interface ObjectArrayToCsvConfig {
+  /** Type identifier for the mapping configuration */
+  _type: 'targetArrayToCsv';
+  
+  /** Option A: Fixed list of CSV column names */
+  targetCsvColumns?: string[];
+  
+  /** Option B: Generate CSV column names using a prefix and index */
+  targetCsvColumnPrefix?: string;
+  
+  /** Maximum number of columns to generate when using prefix */
+  maxColumns?: number;
+  
+  /** Value to use for empty array elements */
+  emptyCellOutput?: string;
+}
+
+/**
+ * The possible values for a HeaderMap entry
+ * @template T - The target object type
+ */
+export type HeaderMapValue<T = any> =
+  | Path<T>                   // Direct path like 'profile.name'
+  | HeaderMapFn<T>            // Custom mapping function
+  | CsvToArrayConfig<T>       // CSV columns -> object array property configuration
+  | ObjectArrayToCsvConfig;   // Object array property -> CSV columns configuration
+
+/**
+ * Enhanced header map type that supports advanced mapping configurations
+ * @template T - The target object type
+ */
+export type HeaderMap<T = any> = {
+  [key: string | number]: HeaderMapValue<T> | (keyof T & string) | string;
 };
 
 /**
@@ -57,6 +130,28 @@ export interface RetryOptions {
  *   (obj, key, value) => typeof value === 'string' ? value.trim() : value
  * );
  * ```
+ * 
+ * // Example with array mapping
+ * ```typescript
+ * interface Product {
+ *   id: string;
+ *   name: string;
+ *   images: string[];
+ * }
+ * 
+ * const headerMap = {
+ *   'sku': 'id',
+ *   'name': 'name',
+ *   '_images': {
+ *     _type: 'csvToTargetArray',
+ *     targetPath: 'images',
+ *     sourceCsvColumnPattern: /^image_(\d+)$/,
+ *     sortSourceColumnsBy: (match) => parseInt(match[1], 10)
+ *   }
+ * };
+ * 
+ * const { fromRowArr, toRowArr } = createHeaderMapFns<Product>(headerMap);
+ * ```
  */
 export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
   headerMap: HeaderMap<To>,
@@ -71,6 +166,31 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
     if (Object.keys(headerMap).length === 0) {
       throw new CSVError('Header map cannot be empty');
     }
+  };
+  
+  // Helper function to ensure array exists at path
+  const ensureArrayAtPath = (obj: any, path: string): any[] => {
+    let current = obj;
+    const parts = path.split('.');
+    
+    // Navigate to the parent object
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (!current[parts[i]]) {
+        current[parts[i]] = {};
+      }
+      current = current[parts[i]];
+    }
+    
+    // Create array if it doesn't exist
+    const lastPart = parts[parts.length - 1];
+    if (!current[lastPart]) {
+      current[lastPart] = [];
+    } else if (!Array.isArray(current[lastPart])) {
+      // Convert to array if not already one
+      current[lastPart] = [current[lastPart]];
+    }
+    
+    return current[lastPart] as any[];
   };
   
   // Validate once during creation
@@ -88,38 +208,164 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
      * // user = { id: '123', profile: { firstName: 'John', lastName: 'Doe' } }
      * ```
      */
-    fromRowArr: (rowArr: RowArr | Record<string, any>): To & Record<string, any> => {
+    fromRowArr: (rowArr: RowArr | Record<string, any>, allHeaders?: string[]): To & Record<string, any> => {
       const to = {} as To & Record<string, any>;
+      const handledCsvHeaders = new Set<string | number>();
       
+      // Convert array to object if needed and provide headers
+      let rowObj: Record<string, any>;
       if (Array.isArray(rowArr)) {
-        // Handle array input
-        for (let i = 0; i < rowArr.length; i++) {
-          const toKey = headerMap[i];
-          if (toKey) {
-            const targetPath = String(toKey); // Ensure it's a string
-            const value = mergeFn ? mergeFn(to, targetPath, rowArr[i]) : rowArr[i];
-            setPath(to, targetPath, value);
+        // If we're dealing with a header-based mapping but have array data,
+        // convert the array to an object using header names
+        const hasStringKeys = Object.keys(headerMap).some(k => isNaN(Number(k)));
+        
+        if (hasStringKeys && allHeaders) {
+          rowObj = {};
+          for (let i = 0; i < rowArr.length && i < allHeaders.length; i++) {
+            rowObj[allHeaders[i]] = rowArr[i];
           }
+        } else {
+          // For numeric keys, keep as array
+          rowObj = [...rowArr];
         }
       } else if (typeof rowArr === 'object' && rowArr !== null) {
-        // Handle object input
-        for (let [key, value] of Object.entries(rowArr)) {
-          const toKey = headerMap[key];
-          if (toKey) {
-            const targetPath = String(toKey); // Ensure it's a string
-            const processedValue = mergeFn ? mergeFn(to, targetPath, value) : value;
-            setPath(to, targetPath, processedValue);
-          }
-        }
+        rowObj = rowArr;
       } else {
         throw new CSVError('Input must be an array or object');
+      }
+      
+      // Process CsvToArrayConfig rules first to collect columns into arrays
+      for (const ruleName in headerMap) {
+        const rule = headerMap[ruleName];
+        
+        // Check if rule is a CsvToArrayConfig
+        if (rule && typeof rule === 'object' && (rule as any)._type === 'csvToTargetArray') {
+          const arrayRule = rule as CsvToArrayConfig<To>;
+          const collectedItems: { value: any; sortKey?: string | number; sourceHeader: string | number }[] = [];
+          
+          // Determine which headers to scan for matches
+          const headersToScan = arrayRule.sourceCsvColumns || allHeaders || Object.keys(rowObj);
+          
+          for (const sourceHeader of headersToScan) {
+            // Skip if header doesn't exist in the row
+            if (!Object.prototype.hasOwnProperty.call(rowObj, sourceHeader)) {
+              continue;
+            }
+            
+            let matches = false;
+            let matchResult: RegExpExecArray | null = null;
+            
+            // Determine if this header matches our array mapping rule
+            if (arrayRule.sourceCsvColumnPattern) {
+              // Pattern-based matching
+              const pattern = arrayRule.sourceCsvColumnPattern;
+              const header = String(sourceHeader);
+              pattern.lastIndex = 0; // Reset the regex
+              matchResult = pattern.exec(header);
+              matches = matchResult !== null;
+            } else if (arrayRule.sourceCsvColumns) {
+              // Explicit list-based matching
+              matches = arrayRule.sourceCsvColumns.includes(String(sourceHeader));
+            }
+            
+            if (matches) {
+              const value = rowObj[sourceHeader];
+              
+              // Skip empty values if configured to do so
+              if ((value === null || value === undefined || String(value).trim() === '') &&
+                  arrayRule.emptyValueStrategy === 'skip') {
+                continue;
+              }
+              
+              // Apply filter if provided
+              if (arrayRule.filterValue && !arrayRule.filterValue(value, String(sourceHeader))) {
+                continue;
+              }
+              
+              // Calculate sort key if needed
+              let sortKey;
+              if (matchResult && arrayRule.sortSourceColumnsBy) {
+                sortKey = arrayRule.sortSourceColumnsBy(matchResult, String(sourceHeader));
+              } else {
+                sortKey = collectedItems.length; // Default to order of appearance
+              }
+              
+              collectedItems.push({
+                value,
+                sortKey,
+                sourceHeader
+              });
+              
+              // Mark this header as handled
+              handledCsvHeaders.add(sourceHeader);
+            }
+          }
+          
+          // Sort the collected items if needed
+          if (collectedItems.length > 0 && 'sortKey' in collectedItems[0]) {
+            collectedItems.sort((a, b) => {
+              if (a.sortKey! < b.sortKey!) return -1;
+              if (a.sortKey! > b.sortKey!) return 1;
+              return 0;
+            });
+          }
+          
+          // Now add the items to the target array
+          if (collectedItems.length > 0) {
+            // Ensure the array exists at the target path
+            const targetArray = ensureArrayAtPath(to, arrayRule.targetPath);
+            
+            // Add items to the array
+            for (const item of collectedItems) {
+              const processedValue = mergeFn 
+                ? mergeFn(to, `${arrayRule.targetPath}[${targetArray.length}]`, item.value) 
+                : item.value;
+              
+              targetArray.push(processedValue);
+            }
+          }
+        }
+      }
+      
+      // Process standard mappings for non-handled headers
+      const processHeaderMapping = (sourceKey: string | number, value: any) => {
+        // Skip headers that were already processed by array mappings
+        if (handledCsvHeaders.has(sourceKey)) {
+          return;
+        }
+        
+        const mapping = headerMap[sourceKey];
+        if (!mapping) {
+          return; // No mapping for this key
+        }
+        
+        if (typeof mapping === 'string') {
+          // Direct string path mapping
+          const processedValue = mergeFn ? mergeFn(to, mapping, value) : value;
+          setPath(to, mapping, processedValue);
+        } else if (typeof mapping === 'function') {
+          // Function mapping
+          (mapping as HeaderMapFn<To>)(to, rowObj, String(sourceKey), allHeaders);
+        }
+        // Skip other mapping types during fromRowArr
+      };
+      
+      // Process all source keys
+      if (Array.isArray(rowArr)) {
+        for (let i = 0; i < rowArr.length; i++) {
+          processHeaderMapping(i, rowArr[i]);
+        }
+      } else {
+        for (const [key, value] of Object.entries(rowObj)) {
+          processHeaderMapping(key, value);
+        }
       }
       
       return to as To & Record<string, any>;
     },
 
     /**
-     * Convert a structured object back to a row array
+     * Convert a structured object back to a row array or object
      * @param objAfterMapWasApplied - Structured object
      * @param headers - Array of header names in order (required for header-based mapping)
      * @param transformFn - Optional function to transform values when converting from object to row
@@ -129,11 +375,6 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
      * const user = { id: '123', profile: { firstName: 'John', lastName: 'Doe' } };
      * const row = toRowArr(user, ['user_id', 'first_name', 'last_name']);
      * // row = ['123', 'John', 'Doe']
-     * 
-     * // With transform function
-     * const csvRow = toRowArr(user, ['user_id', 'first_name', 'last_name'], 
-     *   (value) => typeof value === 'string' ? value.toUpperCase() : value);
-     * // csvRow = ['123', 'JOHN', 'DOE']
      * ```
      */
     toRowArr: (
@@ -147,40 +388,123 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
       }
       
       const row: any[] = [];
+      const rowObj: Record<string, any> = {};
+      const handledPaths = new Set<string>();
+      
+      // Determine if mapping is index-based
       const isIndexBased = Object.keys(headerMap).every(k => !isNaN(Number(k)));
       
-      if (isIndexBased) {
-        // Index-based mapping
-        for (let [rowIdx, path] of Object.entries(headerMap)) {
-          const targetPath = String(path);
-          let value = getPath(objAfterMapWasApplied, targetPath);
+      // Process array-to-csv mappings first
+      for (const objectPath in headerMap) {
+        const mappingRule = headerMap[objectPath];
+        
+        // Handle array-to-csv mappings
+        if (typeof mappingRule === 'object' && mappingRule !== null && (mappingRule as any)._type === 'targetArrayToCsv') {
+          const arrayRule = mappingRule as ObjectArrayToCsvConfig;
+          const sourceArray = getPath(objAfterMapWasApplied, objectPath);
           
-          if (typeof value !== 'undefined') {
-            // Process value
-            value = processValueForOutput(value, targetPath, transformFn);
-            row[parseInt(rowIdx)] = value;
+          if (Array.isArray(sourceArray)) {
+            if (arrayRule.targetCsvColumns) {
+              // Fixed column names
+              for (let i = 0; i < arrayRule.targetCsvColumns.length; i++) {
+                const csvColName = arrayRule.targetCsvColumns[i];
+                const value = i < sourceArray.length ? sourceArray[i] : null;
+                const outputValue = value ?? arrayRule.emptyCellOutput ?? '';
+                
+                if (isIndexBased) {
+                  // For index-based mapping, find the index of this column name
+                  for (const [idx, headerName] of Object.entries(headers)) {
+                    if (headerName === csvColName) {
+                      row[Number(idx)] = outputValue;
+                      break;
+                    }
+                  }
+                } else {
+                  rowObj[csvColName] = outputValue;
+                }
+              }
+            } else if (arrayRule.targetCsvColumnPrefix) {
+              // Dynamic column names with prefix
+              const limit = arrayRule.maxColumns !== undefined 
+                ? Math.min(arrayRule.maxColumns, sourceArray.length) 
+                : sourceArray.length;
+              
+              for (let i = 0; i < limit; i++) {
+                const csvColName = `${arrayRule.targetCsvColumnPrefix}${i + 1}`;
+                const value = sourceArray[i];
+                const outputValue = value ?? arrayRule.emptyCellOutput ?? '';
+                
+                if (isIndexBased) {
+                  // For index-based mapping, find the index of this column name
+                  for (const [idx, headerName] of Object.entries(headers)) {
+                    if (headerName === csvColName) {
+                      row[Number(idx)] = outputValue;
+                      break;
+                    }
+                  }
+                } else {
+                  rowObj[csvColName] = outputValue;
+                }
+              }
+            }
+            
+            handledPaths.add(objectPath);
           }
+          
+          continue;
         }
-      } else {
-        // Header-based mapping
+        
+        // Skip non-array special rules during toRowArr
+        if (typeof mappingRule === 'object' && mappingRule !== null && (mappingRule as any)._type === 'csvToTargetArray') {
+          continue;
+        }
+        
+        // Handle standard direct mappings and function mappings
+        if (typeof mappingRule === 'string') {
+          // Direct path mapping: Field path -> CSV header name
+          const csvHeaderName = mappingRule;
+          let value = getPath(objAfterMapWasApplied, objectPath);
+          
+          if (value !== undefined) {
+            value = processValueForOutput(value, objectPath, transformFn);
+            
+            if (isIndexBased) {
+              // For index-based mapping, find the numeric index of this column name
+              for (const [idx, headerName] of Object.entries(headers)) {
+                if (headerName === csvHeaderName) {
+                  row[Number(idx)] = value;
+                  break;
+                }
+              }
+            } else {
+              rowObj[csvHeaderName] = value;
+            }
+          }
+          
+          handledPaths.add(objectPath);
+        } else if (typeof mappingRule === 'function') {
+          // Function mapping
+          if (isIndexBased) {
+            // Pass the row array directly for index-based functions
+            (mappingRule as HeaderMapFn<any>)(row, objAfterMapWasApplied, objectPath, headers);
+          } else {
+            // Pass the row object for header-based functions
+            (mappingRule as HeaderMapFn<any>)(rowObj, objAfterMapWasApplied, objectPath, headers);
+          }
+          
+          handledPaths.add(objectPath);
+        }
+      }
+      
+      // For header-based output, convert the object to an array
+      if (!isIndexBased) {
         if (!headers || headers.length === 0) {
           throw new CSVError('Headers array is required for header-based mapping');
         }
         
         for (let i = 0; i < headers.length; i++) {
           const headerName = headers[i];
-          const path = headerMap[headerName];
-          
-          if (path) {
-            const targetPath = String(path);
-            let value = getPath(objAfterMapWasApplied, targetPath);
-            
-            if (typeof value !== 'undefined') {
-              // Process value
-              value = processValueForOutput(value, targetPath, transformFn);
-              row[i] = value;
-            }
-          }
+          row[i] = rowObj[headerName] !== undefined ? rowObj[headerName] : '';
         }
       }
       

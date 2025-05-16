@@ -141,6 +141,102 @@ const csvRows = objArrayToArray<Product>(
 
 ## Advanced Usage
 
+### Array Mapping
+
+One of the most powerful features of header mapping is the ability to map multiple CSV columns to a single array property in your objects, and vice versa. This is useful for handling data that has a variable number of related columns, such as images, measurements, or attributes.
+
+#### Mapping Multiple CSV Columns to an Array Property
+
+You can map multiple columns to a single array using either a pattern or explicit column list:
+
+```typescript
+interface Product {
+  id: string;
+  name: string;
+  images: string[]; // Array of image URLs
+}
+
+// Define header mapping with array mapping
+const headerMap: HeaderMap<Product> = {
+  'id': 'id',
+  'name': 'name',
+  '_images': { // The key name here is arbitrary - it doesn't match an actual CSV column
+    _type: 'csvToTargetArray',
+    targetPath: 'images', // The array property to populate
+    sourceCsvColumnPattern: /^image_(\d+)$/, // Matches image_1, image_2, etc.
+    sortSourceColumnsBy: (match) => parseInt(match[1], 10), // Sort by the number
+    filterValue: (value) => !!value, // Skip empty values
+    emptyValueStrategy: 'skip' // Don't include empty values
+  }
+};
+
+// CSV data might look like:
+// id,name,image_1,image_2,image_3
+// P123,Test Product,img1.jpg,img2.jpg,img3.jpg
+
+const products = CSV.fromFile<Product>('products.csv', { headerMap });
+// Result: { id: 'P123', name: 'Test Product', images: ['img1.jpg', 'img2.jpg', 'img3.jpg'] }
+```
+
+You can also explicitly list the source columns:
+
+```typescript
+const headerMap: HeaderMap<Product> = {
+  'id': 'id',
+  'name': 'name',
+  '_images': {
+    _type: 'csvToTargetArray',
+    targetPath: 'images',
+    sourceCsvColumns: ['main_image', 'thumbnail', 'banner_image']
+  }
+};
+
+// CSV data might look like:
+// id,name,main_image,thumbnail,banner_image
+// P123,Test Product,main.jpg,thumb.jpg,banner.jpg
+```
+
+#### Mapping an Array Property to Multiple CSV Columns
+
+When writing objects with arrays to CSV, you can automatically spread the array into multiple columns:
+
+```typescript
+const productHeaderMap: HeaderMap<Product> = {
+  'id': 'product_id',
+  'name': 'product_name',
+  'images': { // This key must match the property name in your object
+    _type: 'targetArrayToCsv',
+    targetCsvColumnPrefix: 'image_', // Creates columns like image_1, image_2, etc.
+    maxColumns: 5, // Maximum number of columns to generate
+    emptyCellOutput: '' // Value for missing array elements
+  }
+};
+
+// Writing objects to CSV
+const products = CSV.fromData([
+  { id: 'P123', name: 'Test Product', images: ['img1.jpg', 'img2.jpg', 'img3.jpg'] }
+]);
+
+products.writeToFile('output.csv', { headerMap: productHeaderMap });
+// Result CSV:
+// product_id,product_name,image_1,image_2,image_3
+// P123,Test Product,img1.jpg,img2.jpg,img3.jpg
+```
+
+You can also specify explicit column names:
+
+```typescript
+const productHeaderMap: HeaderMap<Product> = {
+  'id': 'product_id',
+  'name': 'product_name',
+  'images': {
+    _type: 'targetArrayToCsv',
+    targetCsvColumns: ['main_image', 'thumbnail', 'banner_image'],
+    emptyCellOutput: '[NO IMAGE]'
+  }
+};
+```
+
 ### Custom Type Casting with Header Mapping
 
 When header mapping is used together with custom casting, the casting is applied after the header mapping is performed. This allows you to transform both the structure and types of your data:

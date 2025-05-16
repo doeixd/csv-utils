@@ -64,6 +64,16 @@ vi.mock('stream', () => {
         end: vi.fn().mockReturnValue(true)
       }),
       end: vi.fn().mockReturnValue(true)
-    }))
+    })),
+    pipeline: vi.fn().mockImplementation((source, ...transforms) => {
+      return {
+        on: vi.fn().mockImplementation(function(event, callback) {
+          if (event === 'end') {
+            setTimeout(() => callback(), 10);
+          }
+          return this;
+        })
+      };
+    })
   };
 });
