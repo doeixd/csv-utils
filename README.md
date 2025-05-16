@@ -1361,40 +1361,41 @@ Understanding the sequence in which configurations are applied during CSV readin
 graph TD
     A[Raw File/String Content] --> B{Preamble Extraction?};
     B -- Yes --> C[Store Preamble];
-    C --> D[Content for Parsing - After Preamble];
-    B -- No --> D;
+    C --> D_Preamble[Content for Parsing - After Preamble];
+    B -- No --> D_NoPreamble[Content for Parsing - No Preamble];
+    D_Preamble --> E_Input{options.transformRaw?};
+    D_NoPreamble --> E_Input;
 
-    D --> E{options.transformRaw?};
-    E -- Yes --> F[Apply Raw Transform];
-    F --> G[Content to csv-parse - After Raw Transform];
-    E -- No --> G;
+    E_Input -- Yes --> F[Apply Raw Transform];
+    F --> G_Transformed[Content to csv-parse - After Raw Transform];
+    E_Input -- No --> G_Untransformed[Content to csv-parse - No Raw Transform];
+    G_Transformed --> H[Core CSV Parsing (csv-parse)];
+    G_Untransformed --> H;
 
-    G --> H[Core CSV Parsing (csv-parse)];
-
-    subgraph "Parsed Output Handling"
-        H -- "csvOptions.columns=true" --> I[Initial Objects from csv-parse];
-        H -- "csvOptions.columns=false" --> J[Initial Arrays from csv-parse];
-    end
+    H -- "csvOptions.columns=true" --> I[Initial Objects from csv-parse];
+    H -- "csvOptions.columns=false" --> J[Initial Arrays from csv-parse];
 
     I --> K{options.headerMap?};
     K -- Yes --> L[Apply Header Mapping];
-    L --> N[Mapped Objects];
-    K -- No --> N;
+    L --> N_Mapped[Mapped Objects];
+    K -- No --> N_DirectObjects[Objects from csv-parse (No Header Map)];
+    N_DirectObjects --> P_InputCustomCast;
+    N_Mapped --> P_InputCustomCast;
 
-    N --> P{options.customCasts?};
-    P -- Yes --> Q[Apply Custom Casting];
-    Q --> R[Objects after Custom Casting];
-    P -- No --> R;
+    P_InputCustomCast{options.customCasts?} -- Yes --> Q[Apply Custom Casting];
+    Q --> R_Casted[Objects after Custom Casting];
+    P_InputCustomCast -- No --> R_Uncasted[Objects (No Custom Casting)];
+    R_Casted --> S_InputSchema;
+    R_Uncasted --> S_InputSchema;
 
-    R --> S{options.schema?};
-    S -- Yes --> T[Apply Schema Validation];
-    T --> U[Final Processed Data (Objects)];
-    S -- No --> U;
+    S_InputSchema{options.schema?} -- Yes --> T[Apply Schema Validation];
+    T --> U_Validated[Final Processed Data (Objects)];
+    S_InputSchema -- No --> U_Unvalidated[Final Processed Data (Objects - No Schema)];
 
-    J --> U_Arrays[Final Processed Data (Arrays)];
+    U_Validated --> V[CSV<T> Instance];
+    U_Unvalidated --> V;
 
-    U --> V[CSV<T> Instance];
-    U_Arrays --> V;
+    J --> V_Arrays[CSV<T> Instance (from Arrays)];
 ```
 
 
