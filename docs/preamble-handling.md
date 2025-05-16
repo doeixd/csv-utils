@@ -2,241 +2,232 @@
 
 ## Overview
 
-CSV files sometimes contain metadata, comments, or additional information before the actual CSV data begins. This section before the headers and data is often called a "preamble" or "additional header." The @doeixd/csv-utils library provides robust support for handling these preambles, allowing you to:
+CSV files often include introductory lines before the main data and headers. This "preamble" or "additional header" can contain metadata, comments, version information, or other contextual details. The `@doeixd/csv-utils` library provides robust features to manage these preambles:
 
-- Extract and preserve preamble lines when reading CSV files
-- Add preamble content when writing CSV files
-- Configure custom parsing options for preamble lines
-- Automatically detect and handle prelude content
+*   **Extract and Store:** Capture preamble lines when reading CSV files and store them as a string.
+*   **Custom Preamble Parsing:** Optionally parse the preamble lines themselves using different CSV parsing rules if they have a structured format (e.g., key-value pairs). The parsed result is then re-stringified into the stored `additionalHeader`.
+*   **Prepend to Output:** Add custom or preserved preamble content when writing CSV files.
+*   **Flexible Configuration:** Control preamble extraction based on line counts or in conjunction with the main data's starting line.
+
+**Note:** Preamble handling features described here are primarily available for synchronous and full-file asynchronous read methods like `CSV.fromFile()`, `CSV.fromString()`, and `CSV.fromFileAsync()`. They are **not** part of the low-level streaming APIs like `CSV.streamFromFile()` or the `csvGenerator` functions, which begin processing directly from the configured data start line.
 
 ## Reading CSVs with Preambles
 
-### Basic Usage
+### Configuring Preamble Extraction
 
-To read a CSV file that contains preamble information before the actual data:
+The `saveAdditionalHeader` option in `CSVReadOptions` controls how the preamble is extracted:
+
+1.  **`saveAdditionalHeader: number` (e.g., `3`)**:
+    *   Extracts exactly the specified number of lines from the beginning of the file as the preamble.
+    *   The main CSV data parsing will then start from the line *after* these preamble lines, **unless** `csvOptions.from_line` (or `from` / `fromLine`) is set to an even later line number, in which case `from_line` takes precedence for the data start.
+
+    ```typescript
+    // Example: Extract first 2 lines as preamble, data starts on line 3
+    const csv1 = CSV.fromFile('data.csv', {
+      saveAdditionalHeader: 2 // Extracts lines 1-2 for preamble
+      // Data parsing will implicitly start from line 3
+    });
+
+    // Example: Extract first 2 lines, but data parsing explicitly starts later
+    const csv2 = CSV.fromFile('data.csv', {
+      saveAdditionalHeader: 2,
+      csvOptions: {
+        from_line: 5 // Preamble is lines 1-2; Data parsing starts at line 5
+      }
+    });
+    ```
+
+2.  **`saveAdditionalHeader: true`**:
+    *   This mode works in conjunction with `csvOptions.from_line` (or `from` / `fromLine`).
+    *   If `from_line` is set to a value greater than 1, then `from_line - 1` lines will be extracted as the preamble.
+    *   If `from_line` is not set, or is 1, no preamble is extracted with `saveAdditionalHeader: true`.
+
+    ```typescript
+    // Example CSV ('data_with_header.csv'):
+    // # Comment line 1
+    // # Comment line 2
+    // --- End of Preamble ---
+    // ID,Name,Value  <-- This is line 4
+    // 1,Apple,10
+
+    const csv3 = CSV.fromFile('data_with_header.csv', {
+      saveAdditionalHeader: true,
+      csvOptions: {
+        from_line: 4 // Data starts at line 4
+      }
+    });
+    // csv3.additionalHeader will contain lines 1-3
+    // "# Comment line 1\n# Comment line 2\n--- End of Preamble ---\n" (actual line endings preserved)
+    ```
+
+3.  **`saveAdditionalHeader: false | undefined | 0`**:
+    *   No preamble is extracted. This is the default behavior.
+
+The extracted preamble is stored as a single string in the `csvInstance.additionalHeader` property, with original line endings typically preserved.
+
+### Custom Parsing for Preamble Content (`additionalHeaderParseOptions`)
+
+If the preamble lines themselves have a CSV-like structure (e.g., key:value pairs, different delimiters), you can provide `additionalHeaderParseOptions`. These are `csv-parse` options used *only* to parse the extracted preamble lines. The result of this parsing is then re-stringified (using default `csv-stringify` options) to form the `additionalHeader` string property.
 
 ```typescript
-// Example CSV file with preamble:
-// # Generated on: 2023-12-25
-// # Version: 1.0.0
-// # Notes: This is sample data
-// id,name,value
-// 1,Item A,10.5
-// 2,Item B,20.75
+// Example: Preamble uses '|' delimiter, main data uses ','
+// File 'structured_preamble.csv':
+// MetaKey|MetaValue
+// Version|1.0.5
+// Date|2024-01-15
+// ---
+// ID,DataPoint
+// A,100
 
-// Read the CSV and capture the preamble lines
-const csv = CSV.fromFile('data-with-preamble.csv', {
-  saveAdditionalHeader: true,
+const csvWithStructuredPreamble = CSV.fromFile('structured_preamble.csv', {
+  saveAdditionalHeader: 3, // Lines 1-3 are preamble
   csvOptions: {
-    from_line: 4 // Start parsing from line 4 (first data line after preamble)
-  }
-});
-
-// Access the captured preamble content
-console.log(csv.additionalHeader);
-// "# Generated on: 2023-12-25
-// # Version: 1.0.0
-// # Notes: This is sample data"
-
-// Process the CSV data normally
-const data = csv.toArray();
-```
-
-### Configuration Options
-
-The `saveAdditionalHeader` option controls preamble extraction:
-
-```typescript
-// Specify exact number of lines to treat as preamble
-const csv = CSV.fromFile('data.csv', {
-  saveAdditionalHeader: 3, // Extract exactly 3 lines as preamble
-  csvOptions: {
-    from_line: 4  // Start parsing from line 4
-  }
-});
-
-// Auto-detect preamble based on from_line setting
-const csv = CSV.fromFile('data.csv', {
-  saveAdditionalHeader: true, // Extract from_line - 1 lines as preamble
-  csvOptions: {
-    from_line: 4  // Start parsing from line 4, so 3 lines for preamble
-  }
-});
-```
-
-### Custom Parsing Options for Preamble
-
-You can specify different parsing options for the preamble content:
-
-```typescript
-const csv = CSV.fromFile('data.csv', {
-  saveAdditionalHeader: true,
-  csvOptions: {
-    from_line: 4,
+    from_line: 5, // Main data starts at line 5
     delimiter: ','
   },
   additionalHeaderParseOptions: {
-    delimiter: '|',      // Use different delimiter for preamble
-    quote: '"',          // Specify quote character
-    escape: '\\',        // Specify escape character
-    record_delimiter: '\r\n'  // Specify record delimiter
+    delimiter: '|',
+    columns: false, // Preamble parsed as array of arrays
+    // Other relevant options: quote, escape, record_delimiter, trim, etc.
   }
 });
+
+// csvWithStructuredPreamble.additionalHeader might be:
+// "MetaKey|MetaValue\nVersion|1.0.5\nDate|2024-01-15\n"
+// (The result of parsing with '|' then re-stringifying the array of arrays)
 ```
+**Note:** Options like `columns`, `from_line`, `to_line` within `additionalHeaderParseOptions` will be overridden internally for preamble extraction. Use it primarily for format-defining options like `delimiter`, `quote`, `escape`, `trim`, `bom`. If `additionalHeaderParseOptions` is not provided, but `saveAdditionalHeader` is active, the library might inherit some low-level parsing options (like `delimiter`, `quote`) from the main `csvOptions` for consistency if the preamble is simple text per line.
 
-### Handling Preamble Lines
+### Accessing the Preamble
 
-How `saveAdditionalHeader` controls preamble extraction:
+```typescript
+const csv = CSV.fromFile('data_with_header.csv', {
+  saveAdditionalHeader: true,
+  csvOptions: { from_line: 4 }
+});
 
-- `saveAdditionalHeader: number > 0`: Extracts exactly that number of lines as preamble.
-- `saveAdditionalHeader: true`: If `csvOptions.from_line` > 1, extracts `from_line - 1` lines as preamble.
-- `saveAdditionalHeader: false | undefined | 0`: No preamble extraction.
+if (csv.additionalHeader) {
+  console.log("Preamble Content:");
+  console.log(csv.additionalHeader);
+}
+
+const data = csv.toArray(); // Main CSV data
+```
 
 ## Writing CSVs with Preambles
 
-To write a CSV file with preamble content:
+You can prepend a string to your CSV output using the `additionalHeader` property in `CSVWriteOptions`.
 
 ```typescript
-// Create a CSV instance
-const csv = CSV.fromData([
+const dataToWrite = [
   { id: 1, name: 'Item A', value: 10.5 },
   { id: 2, name: 'Item B', value: 20.75 }
-]);
+];
+const csvInstance = CSV.fromData(dataToWrite);
 
-// Write to file with preamble content
-csv.writeToFile('output.csv', {
-  additionalHeader: '# Generated on: 2023-12-25\n# Version: 1.0.0\n# Notes: This is export data'
+const preambleText =
+  `# File Generated: ${new Date().toISOString()}\n` +
+  `# Source System: MyApp v2.1\n` +
+  `# Record Count: ${dataToWrite.length}\n`;
+
+csvInstance.writeToFile('output_with_preamble.csv', {
+  additionalHeader: preambleText
 });
 
-// Result in output.csv:
-// # Generated on: 2023-12-25
-// # Version: 1.0.0
-// # Notes: This is export data
+// 'output_with_preamble.csv' will contain:
+// # File Generated: 2024-01-18T...
+// # Source System: MyApp v2.1
+// # Record Count: 2
 // id,name,value
 // 1,Item A,10.5
 // 2,Item B,20.75
 ```
 
-### Preserving Original Preamble
+### Preserving an Original Preamble
 
-You can preserve the original preamble when reading and writing:
+If you read a CSV with a preamble and want to write it back out (perhaps after modifying the data), you can use the stored `additionalHeader`.
 
 ```typescript
-// Read CSV with preamble
-const csv = CSV.fromFile('input.csv', {
+const originalCsv = CSV.fromFile('input.csv', {
   saveAdditionalHeader: true,
-  csvOptions: {
-    from_line: 4
-  }
+  csvOptions: { from_line: 3 }
 });
 
-// Modify data
-const modifiedCsv = csv.update(/* some modifications */);
+const modifiedData = originalCsv.updateColumn('value', val => parseFloat(val) * 1.1);
 
-// Write back with the same preamble
-modifiedCsv.writeToFile('output.csv', {
-  additionalHeader: csv.additionalHeader
+modifiedData.writeToFile('output_modified.csv', {
+  additionalHeader: originalCsv.additionalHeader // Use the preamble read from input.csv
 });
 ```
 
-## Advanced Usage
+## Advanced Usage Scenarios
 
-### Combining with Schema Validation
+### Programmatic Preamble Generation
 
-You can use preamble handling together with schema validation:
-
-```typescript
-// Define a schema for the CSV data
-const schema: CSVSchemaConfig<Item> = {
-  rowSchema: /* your schema definition */,
-  columnSchemas: {
-    id: /* schema for id column */,
-    value: /* schema for value column */
-  }
-};
-
-// Read CSV with both preamble extraction and schema validation
-const csv = CSV.fromFile<Item>('data.csv', {
-  saveAdditionalHeader: true,
-  csvOptions: { from_line: 3 },
-  schema
-});
-
-// Access validated data and preamble
-const validData = csv.toArray();
-const metadata = csv.additionalHeader;
-```
-
-### Programmatically Adding Preamble Information
-
-You can generate preamble content dynamically:
+Dynamically create preamble content based on your data or application state.
 
 ```typescript
-const generateMetadata = () => {
-  const now = new Date();
-  return [
-    `# Generated on: ${now.toISOString()}`,
-    `# Generator: My Application v1.0`,
-    `# Records: ${data.length}`
-  ].join('\n');
-};
+const dataForCsv = [ /* ... your data ... */ ];
+const csv = CSV.fromData(dataForCsv);
 
-// Write CSV with dynamically generated preamble
-csv.writeToFile('output.csv', {
-  additionalHeader: generateMetadata()
+function generatePreamble(recordCount: number): string {
+  return `# Report Generated: ${new Date().toLocaleDateString()}\n` +
+         `# Total Records: ${recordCount}\n` +
+         `# Data Version: 1.3\n`;
+}
+
+csv.writeToFile('report.csv', {
+  additionalHeader: generatePreamble(csv.count())
 });
 ```
 
-### Parsing Preamble Content
+### Parsing Information from Preamble Strings
 
-You can extract structured information from the preamble:
+If you need to extract structured data from the `additionalHeader` string after reading:
 
 ```typescript
-const csv = CSV.fromFile('data.csv', {
+const csvFile = CSV.fromFile('data_with_metadata_preamble.csv', {
   saveAdditionalHeader: true,
-  csvOptions: { from_line: 5 }
+  csvOptions: { from_line: 4 }
 });
 
-// Parse metadata from preamble
-const parseMetadata = (preamble: string) => {
-  const result: Record<string, string> = {};
-  
-  preamble.split('\n').forEach(line => {
-    if (line.startsWith('# ')) {
-      const content = line.substring(2);
-      const colonIndex = content.indexOf(':');
-      
-      if (colonIndex > 0) {
-        const key = content.substring(0, colonIndex).trim();
-        const value = content.substring(colonIndex + 1).trim();
-        result[key] = value;
-      }
-    }
+interface PreambleMetadata {
+  version?: string;
+  generatedDate?: Date;
+  source?: string;
+}
+
+function parseMetadataFromPreamble(preambleString?: string): PreambleMetadata {
+  const metadata: PreambleMetadata = {};
+  if (!preambleString) return metadata;
+
+  preambleString.split('\n').forEach(line => {
+    const matchVersion = line.match(/^#\s*Version:\s*(.+)/i);
+    if (matchVersion) metadata.version = matchVersion[1].trim();
+
+    const matchDate = line.match(/^#\s*Generated on:\s*(.+)/i);
+    if (matchDate) metadata.generatedDate = new Date(matchDate[1].trim());
+    // Add more regex or parsing logic for other fields
   });
-  
-  return result;
-};
+  return metadata;
+}
 
-const metadata = parseMetadata(csv.additionalHeader);
-console.log(metadata);
-// { "Generated on": "2023-12-25", "Version": "1.0.0", "Notes": "This is sample data" }
+const extractedMetadata = parseMetadataFromPreamble(csvFile.additionalHeader);
+if (extractedMetadata.version) {
+  console.log(`File Version: ${extractedMetadata.version}`);
+}
 ```
 
-## Best Practices
+## Implementation Details Summary
 
-1. **Consistent Format**: Maintain a consistent format for your preamble information.
-2. **Documentation**: Document the expected preamble format for your CSV files.
-3. **Validation**: Consider validating preamble content if it contains important configuration information.
-4. **Separation**: Use a clear separator (like comment markers #) to distinguish preamble from CSV data.
-5. **Automation**: When possible, automate the extraction and generation of preamble information.
+*   **Reading:**
+    1.  The library first determines the number of preamble lines to extract based on `saveAdditionalHeader` and `csvOptions.from_line`.
+    2.  These lines are read from the input.
+    3.  If `additionalHeaderParseOptions` are provided, these preamble lines are parsed as CSV content, then re-stringified to form the `additionalHeader` string. Otherwise, the raw lines (joined by newlines) form the `additionalHeader`.
+    4.  The main CSV parser (`csv-parse`) is then configured to start parsing from the line immediately following the preamble (or the `csvOptions.from_line` if it's later).
+    5.  The `additionalHeader` string is stored on the `CSV` instance.
+*   **Writing:**
+    1.  If `CSVWriteOptions.additionalHeader` is provided, its string content is written to the output file first.
+    2.  The main CSV data is then stringified and appended to the file.
 
-## Implementation Details
-
-Internally, the library handles preamble extraction by:
-
-1. First reading the specified number of lines from the file
-2. Capturing these lines as the preamble/additional header
-3. Starting the standard CSV parsing from the specified `from_line`
-4. Storing the preamble in the `additionalHeader` property of the CSV instance
-
-When writing files with preambles, the library simply prepends the preamble content to the CSV output before writing to the file.
+This approach ensures that preamble content is handled distinctly from the primary CSV data, allowing for flexible management of metadata and comments.
