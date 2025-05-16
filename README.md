@@ -15,6 +15,8 @@ A TypeScript library for CSV manipulation with strong typing. This library provi
   - [Basic Operations](#basic-operations)
   - [Custom Type Casting](#custom-type-casting)
   - [Header Mapping](#header-mapping)
+  - [Array Mapping](#array-mapping)
+  - [Preamble Handling](#preamble-handling)
   - [Schema Validation](#schema-validation)
   - [Array Transformations](#array-transformations)
   - [Async Processing](#async-processing-with-generators)
@@ -214,7 +216,7 @@ console.log(orders.toArray()[0].tax_rate); // 0.075 (from '7.5%')
 
 The library provides powerful utilities for mapping between flat CSV columns and structured objects with nested properties.
 
-### Basic Mapping
+#### Basic Mapping
 
 ```typescript
 import { createHeaderMapFns } from '@doeixd/csv-utils';
@@ -257,7 +259,7 @@ const rowArray = toRowArr(user, headers);
 // Result: ['123', 'John', 'Doe', 'john@example.com']
 ```
 
-### Reading and Writing with Header Mapping
+#### Reading and Writing with Header Mapping
 
 ```typescript
 import CSV from '@doeixd/csv-utils';
@@ -293,6 +295,175 @@ users.writeToFile('users_export.csv', { headerMap: outputMap });
 
 // Or use the static utility for one-off operations
 CSVUtils.writeCSV('users_export.csv', users.toArray(), { headerMap: outputMap });
+```
+
+### Array Mapping
+
+The library provides powerful support for mapping between multiple CSV columns and array properties.
+
+#### Mapping Multiple Columns to an Array
+
+```typescript
+import CSV, { HeaderMap, CsvToArrayConfig } from '@doeixd/csv-utils';
+
+// Define interface with an array property
+interface Product {
+  id: string;
+  name: string;
+  images: string[]; // Array of image URLs
+}
+
+// Define header mapping with array mapping
+const headerMap: HeaderMap<Product> = {
+  'id': 'id',
+  'name': 'name',
+  '_images': { // The key name is arbitrary, not a CSV column
+    _type: 'csvToTargetArray',
+    targetPath: 'images', // Target array property
+    sourceCsvColumnPattern: /^image_(\d+)$/, // Match image_1, image_2, etc.
+    sortSourceColumnsBy: (match) => parseInt(match[1], 10) // Sort by number
+  } as CsvToArrayConfig
+};
+
+// Read CSV with array mapping
+const products = CSV.fromFile<Product>('products.csv', { headerMap });
+
+// Example input CSV:
+// id,name,image_1,image_2,image_3
+// P123,Test Product,img1.jpg,img2.jpg,img3.jpg
+
+// Result:
+// {
+//   id: 'P123',
+//   name: 'Test Product',
+//   images: ['img1.jpg', 'img2.jpg', 'img3.jpg']
+// }
+```
+
+#### Explicit Column List
+
+```typescript
+const headerMap: HeaderMap<Product> = {
+  'id': 'id',
+  'name': 'name',
+  '_images': {
+    _type: 'csvToTargetArray',
+    targetPath: 'images',
+    sourceCsvColumns: ['main_image', 'thumbnail', 'banner'] // Explicit columns
+  } as CsvToArrayConfig
+};
+
+// Example input CSV:
+// id,name,main_image,thumbnail,banner
+// P123,Test Product,main.jpg,thumb.jpg,banner.jpg
+```
+
+#### Mapping an Array to Multiple Columns
+
+```typescript
+import CSV, { HeaderMap, ObjectArrayToCsvConfig } from '@doeixd/csv-utils';
+
+// Data with array properties
+const products = [
+  {
+    id: 'P123',
+    name: 'Test Product',
+    images: ['img1.jpg', 'img2.jpg', 'img3.jpg']
+  }
+];
+
+// Define header mapping for writing
+const writeHeaderMap: HeaderMap<Product> = {
+  'id': 'id',
+  'name': 'name',
+  'images': { // Must match property name
+    _type: 'targetArrayToCsv',
+    targetCsvColumnPrefix: 'image_', // Creates image_1, image_2, etc.
+    maxColumns: 5, // Maximum number of columns
+    emptyCellOutput: '[NO IMAGE]' // For missing array elements
+  } as ObjectArrayToCsvConfig
+};
+
+// Write to CSV with array-to-columns mapping
+CSV.fromData(products).writeToFile('output.csv', { headerMap: writeHeaderMap });
+
+// Result CSV:
+// id,name,image_1,image_2,image_3
+// P123,Test Product,img1.jpg,img2.jpg,img3.jpg
+```
+
+### Preamble Handling
+
+CSV files sometimes contain metadata, comments, or additional information before the actual CSV data. The library provides robust support for handling these preambles.
+
+#### Reading CSVs with Preambles
+
+```typescript
+// Example CSV file with preamble:
+// # Generated on: 2023-12-25
+// # Version: 1.0.0
+// # Notes: This is sample data
+// id,name,value
+// 1,Item A,10.5
+// 2,Item B,20.75
+
+// Read the CSV and capture the preamble lines
+const csv = CSV.fromFile('data-with-preamble.csv', {
+  saveAdditionalHeader: true, // Capture preamble
+  csvOptions: {
+    from_line: 4 // Start parsing from line 4 (after preamble)
+  }
+});
+
+// Access the captured preamble content
+console.log(csv.additionalHeader);
+// "# Generated on: 2023-12-25
+// # Version: 1.0.0
+// # Notes: This is sample data"
+
+// Process the CSV data normally
+const data = csv.toArray();
+```
+
+#### Writing CSVs with Preambles
+
+```typescript
+// Create a CSV instance
+const csv = CSV.fromData([
+  { id: 1, name: 'Item A', value: 10.5 },
+  { id: 2, name: 'Item B', value: 20.75 }
+]);
+
+// Write to file with preamble content
+csv.writeToFile('output.csv', {
+  additionalHeader: '# Generated on: 2023-12-25\n# Version: 1.0.0\n# Notes: This is export data'
+});
+
+// Result in output.csv:
+// # Generated on: 2023-12-25
+// # Version: 1.0.0
+// # Notes: This is export data
+// id,name,value
+// 1,Item A,10.5
+// 2,Item B,20.75
+```
+
+#### Preserving Original Preamble
+
+```typescript
+// Read CSV with preamble
+const csv = CSV.fromFile('input.csv', {
+  saveAdditionalHeader: true,
+  csvOptions: { from_line: 4 }
+});
+
+// Modify data
+const modifiedCsv = csv.update(/* some modifications */);
+
+// Write back with the same preamble
+modifiedCsv.writeToFile('output.csv', {
+  additionalHeader: csv.additionalHeader
+});
 ```
 
 ### Array Transformations
@@ -845,7 +1016,7 @@ Result type for similarity matches.
 | `validateData` | boolean | Enable basic structural validation |
 | `schema` | CSVSchemaConfig | Schema validation configuration (compatible with Zod) |
 | `allowEmptyValues` | boolean | Allow empty values in the CSV |
-| `saveAdditionalHeader` | boolean \| number | Controls extraction of initial lines as preamble |
+| `saveAdditionalHeader` | boolean \| number | Controls extraction of initial lines as preamble. If `true` and `csvOptions.from_line > 1`, extracts `from_line - 1` lines as preamble. If number > 0, extracts exactly that many lines. |
 | `additionalHeaderParseOptions` | Object | CSV parsing options for preamble lines |
 | `customCasts` | Object | Custom type casting configuration |
 | `customCasts.definitions` | CustomCastDefinition | Global casters for different types |
