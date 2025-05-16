@@ -1194,6 +1194,84 @@ The pipeline is executed when a terminal operation is called:
 
 ## Troubleshooting
 
+### Important Note: Mutability and Query Results
+
+Many of the query methods in this library, such as `findRowWhere` and `findRowsWhere`, **return direct references to the objects within the CSV data**, rather than creating new copies. This design choice enhances performance and enables efficient in-place modifications, but it also introduces a potential pitfall.
+
+**Benefits of Mutability:**
+
+*   **Performance:** Avoids the overhead of creating new objects for each query result, which can be significant for large datasets.
+*   **In-Place Modification:** Allows you to directly modify the data within the CSV instance without the need for additional assignment or update operations. This can simplify certain data manipulation workflows.
+
+**The "Foot Gun": Potential Pitfalls:**
+
+*   **Unintended Side Effects:** If you modify an object returned by a query method, you are directly changing the underlying data within the CSV instance. This can lead to unexpected side effects if other parts of your code are relying on the original state of the data.
+*   **Unexpected Results:** Subsequent queries or operations might be affected by these in-place modifications.
+
+**Example Illustrating the Issue:**
+
+```typescript
+import CSV from '@doeixd/csv-utils';
+
+interface User { id: number; name: string; active: boolean; }
+
+const csv = CSV.fromData<User>([
+  { id: 1, name: 'Alice', active: true },
+  { id: 2, name: 'Bob', active: false },
+  { id: 3, name: 'Carol', active: true }
+]);
+
+// Find the first inactive user
+const inactiveUser = csv.findRowWhere(user => !user.active);
+
+// Directly modify the object returned by findRowWhere
+if (inactiveUser) {
+  inactiveUser.active = true; // **DANGER: Modifies the underlying CSV data!**
+}
+
+// Now the CSV instance has been modified!
+const activeUsers = csv.findRowsWhere(user => user.active);
+console.log(activeUsers.length); // 3 (Bob is now considered active)
+```
+
+**How to Avoid Pitfalls (Best Practices):**
+
+*   **Clone Before Modifying:** To prevent unintended side effects, always clone the object returned by query methods before making any modifications. Use `CSVUtils.clone` for a deep copy:
+
+    ```typescript
+    import CSV, { CSVUtils } from '@doeixd/csv-utils';
+
+    const inactiveUser = csv.findRowWhere(user => !user.active);
+
+    if (inactiveUser) {
+      const clonedUser = CSVUtils.clone(inactiveUser); // Create a deep copy
+      clonedUser.active = true; // Modify the clone, not the original
+      // ... do something with clonedUser, but don't re-insert it into the CSV
+    }
+
+    // Original CSV instance remains unchanged
+    const activeUsers = csv.findRowsWhere(user => user.active);
+    console.log(activeUsers.length); // 2 (Bob is still considered inactive)
+    ```
+
+*   **Use `updateWhere` for Bulk Updates:** If you need to update multiple rows based on a condition, use the `updateWhere` method. This ensures that new objects are created, avoiding direct mutation of the original data:
+
+    ```typescript
+    import CSV from '@doeixd/csv-utils';
+
+    const updatedCsv = csv.updateWhere(
+      user => !user.active,
+      { active: true }  // This creates new objects, not mutating existing ones
+    );
+
+    // The original CSV instance remains unchanged
+    const stillInactive = csv.findRowWhere(user => !user.active); // May still exist
+    // But updatedCsv contains *new* objects
+    const updatedActive = updatedCsv.findRowsWhere(user => user.active); // Will contain Alice, Carol, and a new Bob
+    ```
+
+By being aware of this mutability characteristic and following these best practices, you can effectively leverage the power of this library while avoiding potential issues.
+
 ### Common Issues
 
 -   **Inconsistent Row Lengths / Malformed CSV**:
