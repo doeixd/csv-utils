@@ -121,24 +121,6 @@ CSVUtils.writeCSV('discounted_products.csv', result);
 // CSV.fromData(result).writeToFile('discounted_products.csv');
 ```
 
-## Default Options
-
-By default, all CSV reading methods (`fromString`, `fromFile`, and `fromStream`) set the following options for the underlying `csv-parse` library if not otherwise specified:
-
-- `columns: true` - CSV data is parsed into objects with column headers as keys. This is essential for most object-based operations in the library.
-
-You can override these defaults by providing your own options in the `csvOptions` property:
-
-```typescript
-// Override the default columns setting
-const rawData = CSV.fromString(csvContent, {
-  csvOptions: { columns: false, delimiter: ';' } // Results in arrays of strings
-});
-
-// Use all the defaults (columns: true is applied automatically)
-const data = CSV.fromFile('data.csv');
-```
-
 ## Examples
 
 ### Basic Operations
@@ -1193,6 +1175,24 @@ The pipeline is executed when a terminal operation is called:
     ```
 
 ## Troubleshooting
+
+### Default Options
+
+By default, all CSV reading methods (`fromString`, `fromFile`, and `fromStream`) set the following options for the underlying `csv-parse` library if not otherwise specified:
+
+- `columns: true` - CSV data is parsed into objects with column headers as keys. This is essential for most object-based operations in the library.
+
+You can override these defaults by providing your own options in the `csvOptions` property:
+
+```typescript
+// Override the default columns setting
+const rawData = CSV.fromString(csvContent, {
+  csvOptions: { columns: false, delimiter: ';' } // Results in arrays of strings
+});
+
+// Use all the defaults (columns: true is applied automatically)
+const data = CSV.fromFile('data.csv');
+```
 
 ### Important Note: Mutability and Query Results
 
