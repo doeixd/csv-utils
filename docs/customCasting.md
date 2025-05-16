@@ -1,9 +1,3 @@
-This is a great, detailed section on custom casting! It covers the concepts well and provides good examples. I'll focus on refining the language for clarity, ensuring consistency, and adding a few minor points for completeness or better understanding.
-
-Here's the updated section:
-
----
-
 # Custom Type Casting
 
 ## Overview
