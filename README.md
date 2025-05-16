@@ -89,7 +89,7 @@ pnpm add @doeixd/csv-utils
 ```
 
 ## Quick Start
-
+For more check out the [dedicated quick start guide](docs/quick-start.md)
 ```typescript
 import CSV, { CSVUtils } from '@doeixd/csv-utils';
 
