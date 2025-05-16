@@ -1255,13 +1255,108 @@ export async function sortByAsync<T extends Record<string, any>, K extends keyof
   column: K,
   direction: SortDirection = 'asc'
 ): Promise<T[]> {
-  // For large datasets, use the CSV class method
-  if (data.length > 10000) {
-    return CSV.fromData(data).sortByAsync(column, direction).then(csv => csv.toArray());
+  // For small datasets, just use the regular sort
+  if (data.length <= 10000) {
+    return sortBy(data, column, direction);
   }
   
-  // For smaller datasets, just use the regular sortBy
-  return sortBy(data, column, direction);
+  // Define the compare function based on column and direction
+  const compare = (a: T, b: T): number => {
+    const aVal = a[column];
+    const bVal = b[column];
+    
+    // Handle numeric values
+    if (typeof aVal === 'number' && typeof bVal === 'number') {
+      return direction === 'asc' ? aVal - bVal : bVal - aVal;
+    }
+    
+    // Default string comparison
+    const aStr = String(aVal);
+    const bStr = String(bVal);
+    const comparison = aStr.localeCompare(bStr);
+    return direction === 'asc' ? comparison : -comparison;
+  };
+  
+  // Perform parallel sorting with merge
+  try {
+    const cpuCount = require('os').cpus().length;
+    const workerCount = Math.min(cpuCount, 4); // Limit to 4 workers max
+    
+    // Split into chunks for parallel processing
+    const chunkSize = Math.ceil(data.length / workerCount);
+    const chunks: T[][] = [];
+    
+    for (let i = 0; i < data.length; i += chunkSize) {
+      chunks.push(data.slice(i, i + chunkSize));
+    }
+    
+    // Sort each chunk (could be parallelized in workers)
+    const sortedChunks = await Promise.all(
+      chunks.map(chunk => {
+        return Promise.resolve([...chunk].sort(compare));
+      })
+    );
+    
+    // Merge the sorted chunks (k-way merge)
+    return mergeKSortedArrays(sortedChunks, compare);
+  } catch (error) {
+    // Fallback to synchronous sort if something goes wrong
+    console.warn('Parallel sort failed, falling back to synchronous sort:', error);
+    return [...data].sort(compare);
+  }
+}
+
+/**
+ * Merges K sorted arrays into a single sorted array
+ * @param arrays - Array of sorted arrays
+ * @param compare - Compare function for sorting
+ * @returns Single sorted array
+ * @private
+ */
+function mergeKSortedArrays<T>(arrays: T[][], compare: (a: T, b: T) => number): T[] {
+  if (arrays.length === 0) return [];
+  if (arrays.length === 1) return arrays[0];
+  
+  // Helper to merge two sorted arrays
+  const mergeTwoArrays = (a: T[], b: T[]): T[] => {
+    const result: T[] = [];
+    let i = 0, j = 0;
+    
+    while (i < a.length && j < b.length) {
+      if (compare(a[i], b[j]) <= 0) {
+        result.push(a[i]);
+        i++;
+      } else {
+        result.push(b[j]);
+        j++;
+      }
+    }
+    
+    // Add remaining elements
+    while (i < a.length) result.push(a[i++]);
+    while (j < b.length) result.push(b[j++]);
+    
+    return result;
+  };
+  
+  // Use a divide-and-conquer approach to merge all arrays
+  const mergeArrays = (start: number, end: number): T[] => {
+    if (start === end) {
+      return arrays[start];
+    }
+    
+    if (end - start === 1) {
+      return mergeTwoArrays(arrays[start], arrays[end]);
+    }
+    
+    const mid = Math.floor((start + end) / 2);
+    const left = mergeArrays(start, mid);
+    const right = mergeArrays(mid + 1, end);
+    
+    return mergeTwoArrays(left, right);
+  };
+  
+  return mergeArrays(0, arrays.length - 1);
 }
 
 /**
