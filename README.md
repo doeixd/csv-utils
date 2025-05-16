@@ -1361,31 +1361,40 @@ Understanding the sequence in which configurations are applied during CSV readin
 graph TD
     A[Raw File/String Content] --> B{Preamble Extraction?};
     B -- Yes --> C[Store Preamble];
-    B -- No --> D[Content for Parsing];
-    C --> D;
+    C --> D[Content for Parsing - After Preamble];
+    B -- No --> D;
+
     D --> E{options.transformRaw?};
     E -- Yes --> F[Apply Raw Transform];
-    E -- No --> G[Content to csv-parse];
-    F --> G;
+    F --> G[Content to csv-parse - After Raw Transform];
+    E -- No --> G;
+
     G --> H[Core CSV Parsing (csv-parse)];
-    H -- csvOptions.columns=true --> I[Initial Objects];
-    H -- csvOptions.columns=false --> J[Initial Arrays];
+
+    subgraph "Parsed Output Handling"
+        H -- "csvOptions.columns=true" --> I[Initial Objects from csv-parse];
+        H -- "csvOptions.columns=false" --> J[Initial Arrays from csv-parse];
+    end
+
     I --> K{options.headerMap?};
     K -- Yes --> L[Apply Header Mapping];
-    K -- No --> M[Objects from csv-parse];
     L --> N[Mapped Objects];
-    M --> N;
-    J --> O[Data (as Arrays)];
+    K -- No --> N;
+
     N --> P{options.customCasts?};
     P -- Yes --> Q[Apply Custom Casting];
-    P -- No --> R[Objects after Mapping];
-    Q --> R;
+    Q --> R[Objects after Custom Casting];
+    P -- No --> R;
+
     R --> S{options.schema?};
     S -- Yes --> T[Apply Schema Validation];
-    S -- No --> U[Final Processed Data];
-    T --> U;
-    O --> U; # Path if data remains as arrays (no header map/custom casts on arrays)
+    T --> U[Final Processed Data (Objects)];
+    S -- No --> U;
+
+    J --> U_Arrays[Final Processed Data (Arrays)];
+
     U --> V[CSV<T> Instance];
+    U_Arrays --> V;
 ```
 
 
