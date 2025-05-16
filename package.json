@@ -11,7 +11,13 @@
   "license": "MIT",
   "keywords": [
     "csv",
+    "tsv",
+    "parser",
+    "transform",
     "utils",
+    "csv-parser",
+    "csv-transformer",
+    "csv-writer",
     "csv utils",
     "csv utilities",
     "array of objects",
