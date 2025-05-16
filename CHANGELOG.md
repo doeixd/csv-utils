@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [2.0.0](https://github.com/doeixd/csv-utils/compare/v0.0.12...v2.0.0) (2025-05-16)
+
+
+### Features
+
+* :sparkles: Added casting, more streaming tools, standard schema support, prelude detection, and some additional functions ([13cddfb](https://github.com/doeixd/csv-utils/commit/13cddfb8df5d5d531005975f030b2229298be747))
+
+## [1.0.0](https://github.com/doeixd/csv-utils/compare/v0.0.12...v1.0.0) (2025-05-16)
+
+
+### Features
+
+* :sparkles: Added casting, more streaming tools, standard schema support, prelude detection, and some additional functions ([13cddfb](https://github.com/doeixd/csv-utils/commit/13cddfb8df5d5d531005975f030b2229298be747))
+
 ### [0.0.12](https://github.com/doeixd/csv-utils/compare/v0.0.11...v0.0.12) (2025-05-15)
 
 
