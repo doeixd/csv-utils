@@ -141,6 +141,63 @@ const csvRows = objArrayToArray<Product>(
 
 ## Advanced Usage
 
+### Custom Type Casting with Header Mapping
+
+When header mapping is used together with custom casting, the casting is applied after the header mapping is performed. This allows you to transform both the structure and types of your data:
+
+```typescript
+interface User {
+  id: string;
+  profile: {
+    firstName: string;
+    lastName: string;
+  };
+  metadata: {
+    joinedAt: Date;  // Note this is a Date type, not a string
+    activeDays: number;
+  };
+}
+
+// Define header mapping
+const headerMap: HeaderMap<User> = {
+  'User ID': 'id',
+  'First Name': 'profile.firstName',
+  'Last Name': 'profile.lastName',
+  'Join Date': 'metadata.joinedAt',
+  'Active Days': 'metadata.activeDays'
+};
+
+// Define custom casting
+const dateCaster: Caster<Date> = {
+  test: (value) => /^\d{4}-\d{2}-\d{2}$/.test(value),
+  parse: (value) => new Date(value)
+};
+
+// Read CSV with both header mapping and custom casting
+const users = CSV.fromFile<User>('users.csv', {
+  headerMap,
+  customCasts: {
+    definitions: {
+      date: dateCaster,
+      number: {
+        test: (value) => !isNaN(Number(value)),
+        parse: (value) => Number(value)
+      }
+    },
+    columnCasts: {
+      'metadata.joinedAt': 'date',
+      'metadata.activeDays': 'number'
+    }
+  }
+});
+
+// Now users have properly structured and typed data:
+// - Nested object structure from header mapping
+// - Properly typed values from custom casting
+console.log(users.toArray()[0].metadata.joinedAt instanceof Date); // true
+console.log(typeof users.toArray()[0].metadata.activeDays); // 'number'
+```
+
 ### Bidirectional Mapping
 
 You can use the same header map in both directions by swapping keys and values:

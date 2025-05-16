@@ -11,7 +11,7 @@ import { CSVError } from './index';
  * @template T - Optional type for the target object structure
  */
 export type HeaderMap<T = any> = { 
-  [K in string | number]: keyof T | string 
+  [K in string | number]: keyof T & string | string 
 };
 
 /**
@@ -58,9 +58,9 @@ export interface RetryOptions {
  * );
  * ```
  */
-export function createHeaderMapFns<To extends Record<string, any>, RowArr extends any[] = any[]>(
+export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
   headerMap: HeaderMap<To>,
-  mergeFn?: MergeFn<To>
+  mergeFn?: MergeFn<To & Record<string, any>>
 ) {
   // Validate the header map
   const validateHeaderMap = () => {
@@ -88,8 +88,8 @@ export function createHeaderMapFns<To extends Record<string, any>, RowArr extend
      * // user = { id: '123', profile: { firstName: 'John', lastName: 'Doe' } }
      * ```
      */
-    fromRowArr: (rowArr: RowArr | Record<string, any>): To => {
-      const to = {} as To;
+    fromRowArr: (rowArr: RowArr | Record<string, any>): To & Record<string, any> => {
+      const to = {} as To & Record<string, any>;
       
       if (Array.isArray(rowArr)) {
         // Handle array input
@@ -115,7 +115,7 @@ export function createHeaderMapFns<To extends Record<string, any>, RowArr extend
         throw new CSVError('Input must be an array or object');
       }
       
-      return to;
+      return to as To & Record<string, any>;
     },
 
     /**
@@ -268,11 +268,11 @@ function arrayRowToObjectRow(row: any[], headerRow: string[]): Record<string, an
  * );
  * ```
  */
-export function arrayToObjArray<T extends Record<string, any>>(
+export function arrayToObjArray<T>(
   data: any[],
   headerMap: HeaderMap<T>,
   headerRow?: string[],
-  mergeFn?: MergeFn<T>
+  mergeFn?: MergeFn<T & Record<string, any>>
 ): T[] {
   if (!Array.isArray(data)) {
     throw new CSVError('Data must be an array');
@@ -350,8 +350,8 @@ function validateHeadersIfNeeded<T>(
  * );
  * ```
  */
-export function objArrayToArray<T extends Record<string, any>>(
-  data: T[],
+export function objArrayToArray<T>(
+  data: (T & Record<string, any>)[],
   headerMap: HeaderMap,
   headers: string[] = [],
   includeHeaders: boolean = false,
@@ -411,10 +411,10 @@ export function objArrayToArray<T extends Record<string, any>>(
  * // }
  * ```
  */
-export function groupByField<T extends Record<string, any>>(
-  data: T[],
+export function groupByField<T>(
+  data: (T & Record<string, any>)[],
   field: string
-): Record<string, T[]> {
+): Record<string, (T & Record<string, any>)[]> {
   return data.reduce((groups, item) => {
     const key = String(getPath(item, field) ?? 'undefined');
     if (!groups[key]) {
@@ -422,5 +422,5 @@ export function groupByField<T extends Record<string, any>>(
     }
     groups[key].push(item);
     return groups;
-  }, {} as Record<string, T[]>);
+  }, {} as Record<string, (T & Record<string, any>)[]>);
 }

@@ -14,8 +14,442 @@ import CSV, {
   SortDirection, 
   AggregateOperation,
   SimilarityMatch,
-  CSVArrayUtils
+  CSVArrayUtils,
+  CSVSchemaConfig
 } from './index';
+import { stringify as stringifyCSV } from 'csv/sync';
+
+/**
+ * Adds a new column to each row in the data array.
+ * The new column's value can be a fixed default or derived from a function.
+ * If the column name already exists, its values will be overwritten.
+ *
+ * @template T - The type of objects in the input array.
+ * @template NewKey - The type of the new column's name (string literal).
+ * @template NewValue - The type of the new column's value.
+ * @param data - Array of objects to modify.
+ * @param columnName - The name of the new column.
+ * @param valueOrFn - A fixed value for the new column, or a function that
+ *                    takes the current row and returns the value for the new column.
+ * @returns A new array of objects with the added/updated column.
+ * @example
+ * ```typescript
+ * // interface User { id: number; name: string; }
+ * // const users: User[] = [{ id: 1, name: 'Alice' }];
+ *
+ * // Add a column with a fixed value
+ * const usersWithRole = addColumn(users, 'role', 'user');
+ * // usersWithRole is [{ id: 1, name: 'Alice', role: 'user' }]
+ *
+ * // Add a column with a derived value
+ * const usersWithLen = addColumn(users, 'nameLength', row => row.name.length);
+ * // usersWithLen is [{ id: 1, name: 'Alice', nameLength: 5 }]
+ * ```
+ */
+export function addColumn<
+  T extends Record<string, any>,
+  NewKey extends string,
+  NewValue
+>(
+  data: T[],
+  columnName: NewKey,
+  valueOrFn: NewValue | ((row: T) => NewValue)
+): Array<T & Record<NewKey, NewValue>> {
+  return CSV.fromData(data).addColumn(columnName, valueOrFn).toArray();
+}
+
+/**
+ * Removes one or more columns from each row in the data array.
+ * If a specified column does not exist, it's silently ignored.
+ *
+ * @template T - The type of objects in the input array.
+ * @template K - Union of the keys to be removed.
+ * @param data - Array of objects to modify.
+ * @param columnNames - A single column name or an array of column names to remove.
+ *                      Can be `keyof T` or a string.
+ * @returns A new array of objects with the specified columns removed.
+ * @example
+ * ```typescript
+ * // interface User { id: number; name: string; email: string; }
+ * // const users: User[] = [{ id: 1, name: 'Alice', email: 'a@ex.com' }];
+ *
+ * // Remove a single column
+ * const usersWithoutEmail = removeColumn(users, 'email');
+ * // usersWithoutEmail is [{ id: 1, name: 'Alice' }]
+ *
+ * // Remove multiple columns
+ * const usersOnlyId = removeColumn(users, ['name', 'email']);
+ * // usersOnlyId is [{ id: 1 }]
+ * ```
+ */
+export function removeColumn<
+  T extends Record<string, any>,
+  K extends keyof T | string
+>(
+  data: T[],
+  columnNames: K | K[]
+): Array<Omit<T, Extract<K, keyof T>>> {
+  return CSV.fromData(data).removeColumn(columnNames).toArray();
+}
+
+/**
+ * Renames a column in each row of the data array.
+ * If the old column name does not exist in a row, that row remains unchanged (but its type signature adapts).
+ * If the new column name already exists and is different from the old name, it will be overwritten.
+ *
+ * @template T - The type of objects in the input array.
+ * @template OldK - The type of the old column name.
+ * @template NewK - The type of the new column name (string literal).
+ * @param data - Array of objects to modify.
+ * @param oldName - The current name of the column. Can be `keyof T` or a string.
+ * @param newName - The new name for the column.
+ * @returns A new array of objects with the column renamed.
+ * @example
+ * ```typescript
+ * // interface User { userId: number; userName: string; }
+ * // const users: User[] = [{ userId: 1, userName: 'Alice' }];
+ *
+ * // Rename 'userId' to 'id'
+ * const usersRenamedId = renameColumn(users, 'userId', 'id');
+ * // usersRenamedId is [{ id: 1, userName: 'Alice' }]
+ * ```
+ */
+export function renameColumn<
+  T extends Record<string, any>,
+  OldK extends keyof T | string,
+  NewK extends string
+>(
+  data: T[],
+  oldName: OldK,
+  newName: NewK
+): Array<Omit<T, Extract<OldK, keyof T>> & Record<NewK, OldK extends keyof T ? T[OldK] : any>> {
+  return CSV.fromData(data).renameColumn(oldName, newName).toArray();
+}
+
+/**
+ * Reorders columns in each row of the data array according to the specified order.
+ * Columns not included in `orderedColumnNames` will be placed after the ordered ones,
+ * maintaining their original relative order among themselves.
+ * If `orderedColumnNames` contains names not present in the data, they are ignored.
+ *
+ * @template T - The type of objects in the input array.
+ * @param data - Array of objects to modify.
+ * @param orderedColumnNames - An array of column names (or `keyof T`) in the desired order.
+ * @returns A new array of objects with columns reordered.
+ * @example
+ * ```typescript
+ * // interface User { id: number; name: string; email: string; age: number }
+ * // const users: User[] = [{ id: 1, name: 'Alice', email: 'a@ex.com', age: 30 }];
+ *
+ * // Reorder to: name, id, email, age
+ * const reorderedUsers = reorderColumns(users, ['name', 'id']);
+ * // The keys in reorderedUsers[0] will be 'name', 'id', 'email', 'age' (in that order when iterated).
+ * ```
+ */
+export function reorderColumns<T extends Record<string, any>>(
+  data: T[],
+  orderedColumnNames: (keyof T | string)[]
+): T[] {
+  return CSV.fromData(data).reorderColumns(orderedColumnNames).toArray();
+}
+
+/**
+ * Attempts to cast the values in a specified column to a given data type.
+ * If casting fails for a value (e.g., 'abc' to number), it becomes `null`.
+ * The generic type `T` of the array objects does not change in the function signature
+ * due to runtime casting limitations, but the underlying data's types will change.
+ *
+ * @template T - The type of objects in the input array.
+ * @param data - Array of objects to modify.
+ * @param columnName - The name of the column to cast. Can be `keyof T` or a string.
+ * @param targetType - The target data type: 'string', 'number', 'boolean', or 'date'.
+ * @returns A new array of objects with the column values cast.
+ * @example
+ * ```typescript
+ * // interface Product { id: string; price: string; available: string; }
+ * // const products: Product[] = [
+ * //   { id: '1', price: '19.99', available: 'true' },
+ * //   { id: '2', price: ' N/A ', available: '0' }
+ * // ];
+ *
+ * let castedProducts = castColumnType(products, 'id', 'number');
+ * castedProducts = castColumnType(castedProducts, 'price', 'number');
+ * castedProducts = castColumnType(castedProducts, 'available', 'boolean');
+ * // castedProducts might be:
+ * // [
+ * //   { id: 1, price: 19.99, available: true },
+ * //   { id: '2', price: null, available: false }
+ * // ] (Note: id for 2nd product became '2' due to Product interface, but underlying cast was attempted)
+ * // Actual type of castedProducts elements at runtime will differ from Product interface.
+ * ```
+ */
+export function castColumnType<T extends Record<string, any>>(
+  data: T[],
+  columnName: keyof T | string,
+  targetType: 'string' | 'number' | 'boolean' | 'date'
+): T[] {
+  // The CSV class method returns CSV<T>, so the generic T is preserved.
+  // When calling toArray(), it becomes T[], which is accurate for the structure,
+  // but the runtime types of values within the objects will have changed.
+  return CSV.fromData(data).castColumnType(columnName, targetType).toArray();
+}
+
+/**
+ * Removes duplicate rows from the data array based on all columns or a specified subset of columns.
+ * The first occurrence of a unique row (or unique combination of values in `columnsToCheck`) is kept.
+ *
+ * @template T - The type of objects in the input array.
+ * @param data - Array of objects to deduplicate.
+ * @param columnsToCheck - Optional array of column names (`keyof T`) to check for duplication.
+ *                         If omitted or empty, all columns in a row are used.
+ * @returns A new array of objects with duplicate rows removed.
+ * @example
+ * ```typescript
+ * // interface Item { id: number; category: string; value: number }
+ * // const items: Item[] = [
+ * //   { id: 1, category: 'A', value: 10 }, { id: 2, category: 'B', value: 20 },
+ * //   { id: 1, category: 'A', value: 10 }, { id: 3, category: 'A', value: 30 }
+ * // ];
+ *
+ * const dedupedAll = deduplicate(items);
+ * // dedupedAll: [{ id: 1, category: 'A', value: 10 }, { id: 2, category: 'B', value: 20 }, { id: 3, category: 'A', value: 30 }]
+ *
+ * const dedupedByCat = deduplicate(items, ['category']);
+ * // dedupedByCat: [{ id: 1, category: 'A', value: 10 }, { id: 2, category: 'B', value: 20 }]
+ * ```
+ */
+export function deduplicate<T extends Record<string, any>>(
+  data: T[],
+  columnsToCheck?: (keyof T)[]
+): T[] {
+  return CSV.fromData(data).deduplicate(columnsToCheck).toArray();
+}
+
+/**
+ * Splits the data array into two new arrays based on a condition.
+ * Rows for which the condition is true go into the `pass` array; others go into the `fail` array.
+ *
+ * @template T - The type of objects in the input array.
+ * @param data - Array of objects to split.
+ * @param condition - A function that takes a row and returns `true` if it should
+ *                    be included in the `pass` array.
+ * @returns An object containing two new arrays: `pass` and `fail`.
+ * @example
+ * ```typescript
+ * // interface User { id: number; name: string; age: number }
+ * // const users: User[] = [
+ * //   { id: 1, name: 'Alice', age: 30 }, { id: 2, name: 'Bob', age: 22 },
+ * //   { id: 3, name: 'Carol', age: 35 }
+ * // ];
+ *
+ * const { pass: adults, fail: minors } = split(users, row => row.age >= 30);
+ * // adults is [{ id: 1, name: 'Alice', age: 30 }, { id: 3, name: 'Carol', age: 35 }]
+ * // minors is [{ id: 2, name: 'Bob', age: 22 }]
+ * ```
+ */
+export function split<T extends Record<string, any>>(
+  data: T[],
+  condition: (row: T) => boolean
+): { pass: T[]; fail: T[] } {
+  const { pass: passCsv, fail: failCsv } = CSV.fromData(data).split(condition);
+  return {
+    pass: passCsv.toArray(),
+    fail: failCsv.toArray(),
+  };
+}
+
+/**
+ * Joins the current data array (left table) with another data array (right table).
+ *
+ * @template T - Row type of the left data array.
+ * @template OtherRowType - Row type of the right data array.
+ * @template JoinedRowType - Row type of the resulting joined data.
+ * @param dataLeft - The left array of objects.
+ * @param dataRight - The right array of objects to join with.
+ * @param onConfig - An object specifying the join keys and type:
+ *             `left`: The key (column name) from the `dataLeft`.
+ *             `right`: The key (column name) from the `dataRight`.
+ *             `type`: Optional join type: 'inner' (default), 'left', 'right', 'outer'.
+ * @param select - Optional function to transform the combined row. It receives `leftRow`
+ *                 (or `null`) and `rightRow` (or `null`).
+ *                 Default merge is `{ ...leftRow, ...rightRow }`.
+ * @returns A new array of objects with the joined data.
+ * @example
+ * ```typescript
+ * // interface User { id: number; name: string; cityId: number; }
+ * // interface City { cityId: number; cityName: string; }
+ * // const users: User[] = [{ id: 1, name: 'Alice', cityId: 101 }];
+ * // const cities: City[] = [{ cityId: 101, cityName: 'New York' }];
+ *
+ * const innerJoined = join(
+ *   users,
+ *   cities,
+ *   { left: 'cityId', right: 'cityId', type: 'inner' }
+ * );
+ * // innerJoined: [{ id: 1, name: 'Alice', cityId: 101, cityName: 'New York' }]
+ * ```
+ */
+export function join<
+  T extends Record<string, any>,
+  OtherRowType extends Record<string, any>,
+  JoinedRowType extends Record<string, any> = T & Partial<OtherRowType>
+>(
+  dataLeft: T[],
+  dataRight: OtherRowType[],
+  onConfig: {
+    left: keyof T;
+    right: keyof OtherRowType;
+    type?: 'inner' | 'left' | 'right' | 'outer';
+  },
+  select?: (leftRow: T | null, rightRow: OtherRowType | null) => JoinedRowType
+): JoinedRowType[] {
+  const csvLeft = CSV.fromData(dataLeft);
+  const csvRight = CSV.fromData(dataRight);
+  return csvLeft.join<OtherRowType, JoinedRowType>(csvRight, onConfig, select).toArray();
+}
+
+/**
+ * Transforms data from a wide format to a long format (unpivots or melts).
+ * Specified `valueCols` are converted into two new columns: one for the original
+ * column name (variable) and one for its value. `idCols` are repeated.
+ *
+ * @template T - Row type of the input data.
+ * @template IdKeys - Keys of the identifier columns.
+ * @template ValueKeys - Keys of the value columns being unpivoted.
+ * @template VarNameCol - Type of the new variable name column.
+ * @template ValueNameCol - Type of the new value name column.
+ * @param data - Array of objects to unpivot.
+ * @param idCols - Array of column names (`keyof T`) that identify each observation.
+ * @param valueCols - Array of column names (`keyof T`) whose values will be unpivoted.
+ * @param varName - Name for the new column holding original column names. Defaults to 'variable'.
+ * @param valueName - Name for the new column holding values. Defaults to 'value'.
+ * @returns A new array of objects with the unpivoted data.
+ * @example
+ * ```typescript
+ * // interface Sales { product: string; q1_sales: number; q2_sales: number; }
+ * // const salesData: Sales[] = [{ product: 'A', q1_sales: 100, q2_sales: 150 }];
+ *
+ * const unpivoted = unpivot(
+ *   salesData,
+ *   ['product'],
+ *   ['q1_sales', 'q2_sales'],
+ *   'quarter',
+ *   'amount'
+ * );
+ * // unpivoted:
+ * // [
+ * //   { product: 'A', quarter: 'q1_sales', amount: 100 },
+ * //   { product: 'A', quarter: 'q2_sales', amount: 150 }
+ * // ]
+ * ```
+ */
+export function unpivot<
+  T extends Record<string, any>,
+  IdKeys extends keyof T,
+  ValueKeys extends keyof T,
+  VarNameCol extends string = 'variable',
+  ValueNameCol extends string = 'value'
+>(
+  data: T[],
+  idCols: IdKeys[],
+  valueCols: ValueKeys[],
+  varName: VarNameCol = 'variable' as VarNameCol,
+  valueName: ValueNameCol = 'value' as ValueNameCol
+): Array<
+  Pick<T, IdKeys> &
+  Record<VarNameCol, ValueKeys extends string ? ValueKeys : string> &
+  Record<ValueNameCol, T[ValueKeys]>
+> {
+  return CSV.fromData(data)
+    .unpivot<IdKeys, ValueKeys, VarNameCol, ValueNameCol>(idCols, valueCols, varName, valueName)
+    .toArray();
+}
+
+/**
+ * Fills missing values (`null` or `undefined`) in a specified column of the data array.
+ * The generic type T of array objects does not change, but underlying data types might.
+ *
+ * @template T - The type of objects in the input array.
+ * @template K - The key of the column to fill.
+ * @param data - Array of objects to modify.
+ * @param columnName - The name of the column to fill missing values in.
+ * @param valueOrFn - The value to fill with, or a function that takes the current row
+ *                    and returns the value to fill with. Can be of `any` type for flexibility.
+ * @returns A new array of objects with missing values filled.
+ * @example
+ * ```typescript
+ * // interface Product { name: string; price?: number | null; }
+ * // const products: Product[] = [ { name: 'Apple', price: 1.0 }, { name: 'Banana', price: null }];
+ *
+ * const filledProducts = fillMissingValues(products, 'price', 0);
+ * // filledProducts: [{ name: 'Apple', price: 1.0 }, { name: 'Banana', price: 0 }]
+ * ```
+ */
+export function fillMissingValues<T extends Record<string, any>, K extends keyof T>(
+  data: T[],
+  columnName: K,
+  valueOrFn: T[K] | any | ((row: T) => T[K] | any)
+): T[] {
+  return CSV.fromData(data).fillMissingValues(columnName, valueOrFn).toArray();
+}
+
+/**
+ * Normalizes the text case of string values in a specified column of the data array.
+ * Non-string values or missing columns are not affected.
+ *
+ * @template T - The type of objects in the input array.
+ * @template K - The key of the column to normalize.
+ * @param data - Array of objects to modify.
+ * @param columnName - The name of the column to normalize.
+ * @param normalizationType - The type of normalization: 'lowercase', 'uppercase', or 'capitalize'.
+ * @returns A new array of objects with text normalized.
+ * @example
+ * ```typescript
+ * // interface City { name: string; countryCode: string; }
+ * // const cities: City[] = [{ name: 'new york city', countryCode: 'us' }];
+ *
+ * const capNames = normalizeText(cities, 'name', 'capitalize');
+ * // capNames[0].name is 'New York City'
+ * const upperCodes = normalizeText(cities, 'countryCode', 'uppercase');
+ * // upperCodes[0].countryCode is 'US'
+ * ```
+ */
+export function normalizeText<T extends Record<string, any>, K extends keyof T>(
+  data: T[],
+  columnName: K,
+  normalizationType: 'lowercase' | 'uppercase' | 'capitalize'
+): T[] {
+  return CSV.fromData(data).normalizeText(columnName, normalizationType).toArray();
+}
+
+/**
+ * Trims leading and trailing whitespace from string values in specified columns of the data array.
+ * If no columns are specified, it attempts to trim all string values in all columns.
+ * Non-string values are not affected.
+ *
+ * @template T - The type of objects in the input array.
+ * @param data - Array of objects to modify.
+ * @param columns - Optional array of column names (`keyof T` or string) to trim.
+ *                  If omitted, all columns with string values are processed.
+ * @returns A new array of objects with whitespace trimmed.
+ * @example
+ * ```typescript
+ * // interface Contact { name: string; city: string; }
+ * // const contacts: Contact[] = [{ name: '  Alice  ', city: ' New York ' }];
+ *
+ * const trimmedContacts = trimWhitespace(contacts, ['name', 'city']);
+ * // trimmedContacts[0] is { name: 'Alice', city: 'New York' }
+ *
+ * const trimmedAll = trimWhitespace(contacts); // Also trims 'name' and 'city'
+ * ```
+ */
+export function trimWhitespace<T extends Record<string, any>>(
+  data: T[],
+  columns?: (keyof T | string)[]
+): T[] {
+  return CSV.fromData(data).trimWhitespace(columns).toArray();
+}
+
 
 /**
  * Find the first row where column matches value exactly
@@ -570,6 +1004,283 @@ export const arrayTransformations = {
   get groupByField() { return CSVArrayUtils.groupByField; }
 };
 
+/**
+ * Get the number of rows in the data
+ * @param data - Array of objects
+ * @returns The number of rows
+ * @example
+ * ```typescript
+ * const rowCount = count(products);
+ * ```
+ */
+export function count<T extends Record<string, any>>(
+  data: T[]
+): number {
+  return data.length;
+}
+
+/**
+ * Converts data to a CSV string
+ * @param data - Array of objects to convert
+ * @param options - Stringify options
+ * @returns CSV content as a string
+ * @example
+ * ```typescript
+ * const csvData = toString(products, { header: true });
+ * ```
+ */
+export function toString<T extends Record<string, any>>(
+  data: T[],
+  options: Parameters<typeof stringifyCSV>[1] = { header: true }
+): string {
+  try {
+    return stringifyCSV(data, options);
+  } catch (error) {
+    throw new CSVError('Failed to convert data to CSV string', error);
+  }
+}
+
+/**
+ * Validates data against a schema
+ * @param data - Array of objects to validate
+ * @param schema - The schema configuration to use for validation
+ * @returns The validated data
+ * @example
+ * ```typescript
+ * const validatedProducts = validate(products, {
+ *   type: 'standard',
+ *   version: 1,
+ *   mode: 'strict',
+ *   schema: {
+ *     id: { type: 'string', required: true },
+ *     price: { type: 'number', required: true }
+ *   }
+ * });
+ * ```
+ */
+export function validate<T extends Record<string, any>, U extends Record<string, any> = T>(
+  data: T[],
+  schema: CSVSchemaConfig<U>
+): U[] {
+  if (data.length === 0) {
+    return [];
+  }
+  
+  return CSV.fromData(data).validate(schema).toArray();
+}
+
+/**
+ * Process each row with a callback function
+ * @param data - Array of objects to process
+ * @param callback - Function to process each row
+ * @example
+ * ```typescript
+ * forEach(products, (product, index) => {
+ *   console.log(`Product ${index}: ${product.name}`);
+ * });
+ * ```
+ */
+export function forEach<T extends Record<string, any>>(
+  data: T[],
+  callback: (row: T, index: number) => void
+): void {
+  data.forEach(callback);
+}
+
+/**
+ * Process rows with an async callback
+ * @param data - Array of objects to process
+ * @param callback - Async function to process each row
+ * @param options - Options for batch processing
+ * @returns Promise that resolves when processing is complete
+ * @example
+ * ```typescript
+ * await forEachAsync(products, async (product) => {
+ *   await api.updateProduct(product.id, product);
+ * }, { batchSize: 5 });
+ * ```
+ */
+export async function forEachAsync<T extends Record<string, any>>(
+  data: T[],
+  callback: (row: T, index: number) => Promise<void>,
+  options: { batchSize?: number; batchConcurrency?: number } = {}
+): Promise<void> {
+  const batchSize = options.batchSize || 1;
+  const batchConcurrency = options.batchConcurrency || 1;
+  
+  if (batchSize <= 1 && batchConcurrency <= 1) {
+    // Original sequential processing
+    for (let i = 0; i < data.length; i++) {
+      await callback(data[i], i);
+    }
+    return;
+  }
+  
+  // Process data in batches with concurrency
+  const batches: T[][] = [];
+  for (let i = 0; i < data.length; i += batchSize) {
+    batches.push(data.slice(i, i + batchSize));
+  }
+  
+  // Process batches with controlled concurrency
+  for (let i = 0; i < batches.length; i += batchConcurrency) {
+    const batchPromises = batches.slice(i, i + batchConcurrency).map(async (batch, batchIndex) => {
+      const startIdx = i * batchSize + batchIndex * batchSize;
+      const promises = batch.map((row, rowIndex) => 
+        callback(row, startIdx + rowIndex)
+      );
+      await Promise.all(promises);
+    });
+    
+    await Promise.all(batchPromises);
+  }
+}
+
+/**
+ * Map over rows asynchronously
+ * @param data - Array of objects to transform
+ * @param transformer - Async function to transform each row
+ * @param options - Optional batch processing options
+ * @returns Promise resolving to array of transformed results
+ * @example
+ * ```typescript
+ * const enrichedProducts = await mapAsync(products, 
+ *   async (product) => {
+ *     const details = await api.getProductDetails(product.id);
+ *     return { ...product, details };
+ *   },
+ *   { batchSize: 5 }
+ * );
+ * ```
+ */
+export async function mapAsync<T extends Record<string, any>, R>(
+  data: T[],
+  transformer: (row: T, index: number) => Promise<R>,
+  options?: { batchSize?: number }
+): Promise<R[]> {
+  const result: R[] = [];
+  const batchSize = options?.batchSize || 50;
+  
+  for (let i = 0; i < data.length; i += batchSize) {
+    const batch = data.slice(i, i + batchSize);
+    const batchResults = await Promise.all(
+      batch.map((row, index) => transformer(row, i + index))
+    );
+    result.push(...batchResults);
+  }
+  
+  return result;
+}
+
+/**
+ * Reduce rows asynchronously
+ * @param data - Array of objects to reduce
+ * @param reducer - Async reducer function
+ * @param initialValue - Initial accumulator value
+ * @param options - Optional processing options
+ * @returns Promise resolving to final accumulated value
+ * @example
+ * ```typescript
+ * const totalRevenue = await reduceAsync(
+ *   orders,
+ *   async (total, order) => {
+ *     const exchangeRate = await getExchangeRate(order.currency);
+ *     return total + (order.amount * exchangeRate);
+ *   },
+ *   0
+ * );
+ * ```
+ */
+export async function reduceAsync<T extends Record<string, any>, R>(
+  data: T[],
+  reducer: (accumulator: R, row: T, index: number) => Promise<R>,
+  initialValue: R,
+  options?: { strategy?: 'sequential' | 'mapreduce', batchSize?: number }
+): Promise<R> {
+  const strategy = options?.strategy || 'sequential';
+  const batchSize = options?.batchSize || 100;
+  
+  if (strategy === 'sequential') {
+    // Simple sequential reduction
+    let accumulator = initialValue;
+    
+    for (let i = 0; i < data.length; i++) {
+      accumulator = await reducer(accumulator, data[i], i);
+    }
+    
+    return accumulator;
+  } else {
+    // Map-reduce strategy for better parallelism
+    // First map: Process items in batches
+    const batches = [];
+    for (let i = 0; i < data.length; i += batchSize) {
+      batches.push(data.slice(i, i + batchSize));
+    }
+    
+    // Process each batch in parallel with its own accumulator
+    const batchResults = await Promise.all(
+      batches.map(async (batch, batchIndex) => {
+        let batchAccumulator = initialValue;
+        for (let i = 0; i < batch.length; i++) {
+          const index = batchIndex * batchSize + i;
+          batchAccumulator = await reducer(batchAccumulator, batch[i], index);
+        }
+        return batchAccumulator;
+      })
+    );
+    
+    // Then reduce: Combine batch results
+    let finalResult = initialValue;
+    for (const result of batchResults) {
+      finalResult = await reducer(finalResult, result as unknown as T, -1);
+    }
+    
+    return finalResult;
+  }
+}
+
+/**
+ * Sorts rows by a column using worker threads for large datasets
+ * @param data - Array of objects to sort
+ * @param column - The column to sort by
+ * @param direction - Sort direction (default: 'asc')
+ * @returns Promise resolving to sorted array
+ * @example
+ * ```typescript
+ * const sortedProducts = await sortByAsync(products, 'price', 'desc');
+ * ```
+ */
+export async function sortByAsync<T extends Record<string, any>, K extends keyof T>(
+  data: T[], 
+  column: K,
+  direction: SortDirection = 'asc'
+): Promise<T[]> {
+  // For large datasets, use the CSV class method
+  if (data.length > 10000) {
+    return CSV.fromData(data).sortByAsync(column, direction).then(csv => csv.toArray());
+  }
+  
+  // For smaller datasets, just use the regular sortBy
+  return sortBy(data, column, direction);
+}
+
+/**
+ * Get the first n rows (alias for head)
+ * @param data - Array of objects
+ * @param count - Number of rows to get
+ * @returns First n rows
+ * @example
+ * ```typescript
+ * const topProducts = take(products, 5);
+ * ```
+ */
+export function take<T extends Record<string, any>>(
+  data: T[], 
+  count: number = 10
+): T[] {
+  return head(data, count);
+}
+
 // Export all the functions as a default object
 export default {
   findRow,
@@ -587,6 +1298,7 @@ export default {
   removeWhere,
   append,
   sortBy,
+  sortByAsync,
   aggregate,
   distinct,
   pivot,
@@ -594,10 +1306,30 @@ export default {
   sample,
   head,
   tail,
+  take,
+  count,
+  toString,
+  validate,
+  forEach,
+  forEachAsync,
+  mapAsync,
+  reduceAsync,
   getBaseRow,
   createRow,
   mapData,
   filterData,
   reduceData,
+  addColumn,
+  removeColumn,
+  renameColumn,
+  reorderColumns,
+  castColumnType,
+  deduplicate,
+  split,
+  join,
+  unpivot,
+  fillMissingValues,
+  normalizeText,
+  trimWhitespace,
   arrayTransformations
 };
