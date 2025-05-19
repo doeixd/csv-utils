@@ -16,6 +16,7 @@ import { Readable, Transform, Writable, pipeline as streamPipeline } from 'node:
 import { type Transform as NodeTransform } from 'node:stream'
 import { promisify } from 'node:util';
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
+import os from 'node:os';
 
 export * from './headers'
 export * from './schema'
@@ -264,12 +265,12 @@ export type SortDirection = 'asc' | 'desc';
 export class CSV<T extends Record<string, any>> {
   /** Validation results if schema validation was used with 'keep' mode */
   readonly validationResults?: RowValidationResult<T>[];
-  
+
   private constructor(
-    private readonly data: T[], 
+    private readonly data: T[],
     readonly additionalHeader?: string,
     validationResults?: RowValidationResult<T>[]
-  ) { 
+  ) {
     this.validationResults = validationResults;
   }
 
@@ -380,24 +381,24 @@ export class CSV<T extends Record<string, any>> {
     baseLineNumber: number = 1
   ): [T[], RowValidationResult<T>[]] {
     const { rowSchema, columnSchemas, validationMode = 'error', useAsync = false } = schemaConfig;
-    
+
     // If schema is configured for async validation, throw an error in this sync method
     if (useAsync) {
       throw new CSVError(
         "Asynchronous schema validation is not supported in synchronous CSV methods. Use an async method (e.g., fromFileAsync, validateAsync) or set useAsync: false."
       );
     }
-    
+
     const validationResults: RowValidationResult<T>[] = [];
     const validatedData: T[] = [];
-    
+
     // Function to validate a row synchronously
     const validateRowSync = (row: Record<string, any>, index: number): RowValidationResult<T> => {
       const result: RowValidationResult<T> = {
         originalRow: row,
         valid: true
       };
-      
+
       // Validate row using row schema if provided
       if (rowSchema) {
         const rowValidation = tryValidateStandardSchemaSync(rowSchema, row);
@@ -411,19 +412,19 @@ export class CSV<T extends Record<string, any>> {
         // If no row schema, original row is the validated row
         result.validatedRow = row as T;
       }
-      
+
       // Validate individual columns if provided
       if (columnSchemas) {
         result.columnIssues = {};
-        
+
         for (const [column, schema] of Object.entries(columnSchemas)) {
           if (!schema) continue;
-          
+
           const columnValidation = tryValidateStandardSchemaSync(schema, row[column]);
           if (columnValidation.issues) {
             result.valid = false;
             result.columnIssues[column] = [...columnValidation.issues];
-            
+
             // If row validation succeeded but column validation failed, update the column value in validated row
             if (result.validatedRow && !result.rowIssues) {
               if ('value' in columnValidation) {
@@ -438,39 +439,39 @@ export class CSV<T extends Record<string, any>> {
             (result.validatedRow as any)[column] = columnValidation.value;
           }
         }
-        
+
         // If no column issues, remove the empty object
         if (Object.keys(result.columnIssues).length === 0) {
           delete result.columnIssues;
         }
       }
-      
+
       return result;
     };
-    
+
     // Process each row synchronously
     const results = data.map(validateRowSync);
-    
+
     // Process validation results
     for (const result of results) {
       validationResults.push(result);
-      
+
       if (result.valid && result.validatedRow) {
         validatedData.push(result.validatedRow);
       } else if (validationMode === 'error') {
         // Collect all validation issues for better error reporting
         const issues: string[] = [];
-        
+
         if (result.rowIssues) {
           issues.push(`Row validation issues: ${result.rowIssues.map(i => i.message).join(', ')}`);
         }
-        
+
         if (result.columnIssues) {
           for (const [column, columnIssues] of Object.entries(result.columnIssues)) {
             issues.push(`Column '${column}' validation issues: ${columnIssues.map(i => i.message).join(', ')}`);
           }
         }
-        
+
         throw new CSVError(`CSV validation failed: ${issues.join('; ')}`);
       } else if (validationMode === 'filter') {
         // Skip invalid rows - don't add to validatedData
@@ -480,10 +481,10 @@ export class CSV<T extends Record<string, any>> {
         validatedData.push(result.originalRow as T);
       }
     }
-    
+
     return [validatedData, validationResults];
   }
-  
+
   /**
    * For backward compatibility - redirects to the appropriate sync or async validation method
    * @private
@@ -501,7 +502,7 @@ export class CSV<T extends Record<string, any>> {
       return this._validateWithSchemaSync(data, schemaConfig, baseLineNumber);
     }
   }
-  
+
   /**
    * Create a CSV instance from a file
    * @param filename - Path to the CSV file
@@ -619,7 +620,7 @@ export class CSV<T extends Record<string, any>> {
       const contentForMainParsing = options.transform ? options.transform(rawFullContent.trim()) : rawFullContent.trim();
       // Explicitly set columns: true as the default, then spread user options for clarity and consistency
       // This ensures the desired default behavior while still allowing user overrides if needed
-      const finalMainParserOptions: CsvParseInternalOptions = { 
+      const finalMainParserOptions: CsvParseInternalOptions = {
         columns: true,
         ...(options.csvOptions || {})
       };
@@ -650,7 +651,7 @@ export class CSV<T extends Record<string, any>> {
 
       // Initial parsing of the data
       const dataAfterCsvParse = parseCSV(contentForMainParsing, finalMainParserOptions) as any[];
-      
+
       // Process the data with the shared function (apply header mapping and custom casting)
       const baseLineNumber = finalMainParserOptions.from_line || 1;
       const parsedData = this.processCSVData<T>(dataAfterCsvParse, options as CSVReadOptions<T & Record<string, any>>, baseLineNumber);
@@ -670,7 +671,7 @@ export class CSV<T extends Record<string, any>> {
           });
         }
       }
-      
+
       // Apply schema validation if configured
       if (options.schema && parsedData.length > 0) {
         // If schema specifies async validation, throw an error as fromFile is synchronous
@@ -679,19 +680,19 @@ export class CSV<T extends Record<string, any>> {
             "Asynchronous schema validation is not supported in fromFile. Use fromFileAsync instead, or set useAsync: false in your schema configuration."
           );
         }
-        
+
         // Ensure synchronous validation is used
         const syncSchema: CSVSchemaConfig<T> = {
           ...options.schema,
           useAsync: false
         };
-        
+
         const [validatedData, validationResults] = this._validateWithSchemaSync(
-          parsedData, 
-          syncSchema, 
+          parsedData,
+          syncSchema,
           baseLineNumber
         );
-        
+
         // Return validated data and include validation results
         return new CSV<T>(validatedData, fileAdditionalHeader, validationResults);
       }
@@ -753,20 +754,20 @@ export class CSV<T extends Record<string, any>> {
       const { fromRowArr } = createHeaderMapFns<T & Record<string, any>>(options.headerMap);
       processedData = dataAfterCsvParse.map(row => fromRowArr(row));
     }
-    
+
     // Apply custom casting if specified
     if (options.customCasts && processedData.length > 0) {
       const { definitions, columnCasts, onCastError = 'error' } = options.customCasts;
-      
+
       // Only apply custom casting to object-based rows
       if (typeof processedData[0] === 'object' && processedData[0] !== null) {
         return processedData.map((row: Record<string, any>, rowIndex: number) => {
           const newRow = { ...row };
-          
+
           for (const columnName in row) {
             if (Object.prototype.hasOwnProperty.call(row, columnName)) {
               const originalValue = row[columnName];
-              
+
               // Prepare string input for custom casters
               let valueToTestAndParse: string;
               if (typeof originalValue === 'string') {
@@ -778,7 +779,7 @@ export class CSV<T extends Record<string, any>> {
               } else {
                 valueToTestAndParse = String(originalValue);
               }
-              
+
               // Build casting context
               const context: CastingContext = {
                 column: columnName,
@@ -790,10 +791,10 @@ export class CSV<T extends Record<string, any>> {
                 invalid_field_length: 0,
                 quoting: false
               };
-              
+
               let castSuccessful = false;
               let castedValue: any = originalValue; // Default to original value
-              
+
               // Function to apply a caster
               const applyCaster = (caster: Caster<any>): boolean => {
                 if (caster.test(valueToTestAndParse, context)) {
@@ -817,34 +818,34 @@ export class CSV<T extends Record<string, any>> {
                 }
                 return false; // Caster test failed
               };
-              
+
               // 1. Try column-specific casters first
               if (columnCasts && columnCasts[columnName as string]) {
                 const columnRule = columnCasts[columnName as string];
                 const rulesToTry = Array.isArray(columnRule) ? columnRule : [columnRule];
-                
+
                 for (const rule of rulesToTry) {
                   let casterToUse: Caster<any> | undefined;
-                  
+
                   if (typeof rule === 'string' && definitions && definitions[rule as keyof CustomCastDefinition]) {
                     casterToUse = definitions[rule as keyof CustomCastDefinition];
                   } else if (typeof rule === 'object' && rule !== null && 'test' in rule && 'parse' in rule) {
                     casterToUse = rule as Caster<any>;
                   }
-                  
+
                   if (casterToUse && applyCaster(casterToUse)) {
                     break; // First successful caster wins
                   }
                 }
               }
-              
+
               // 2. If no column-specific caster succeeded, try global casters
               if (!castSuccessful && definitions) {
                 // Predefined order for more predictable behavior
                 const orderedGlobalKeys: (keyof CustomCastDefinition)[] = [
                   'null', 'boolean', 'number', 'date', 'object', 'array', 'string'
                 ];
-                
+
                 for (const defKey of orderedGlobalKeys) {
                   const globalCaster = definitions[defKey];
                   if (globalCaster && applyCaster(globalCaster)) {
@@ -852,17 +853,17 @@ export class CSV<T extends Record<string, any>> {
                   }
                 }
               }
-              
+
               // Set the potentially modified value in the new row
               newRow[columnName] = castedValue;
             }
           }
-          
+
           return newRow as T;
         });
       }
     }
-    
+
     // No header mapping or custom casting needed, or non-object rows
     return processedData as (T & Record<string, any>)[];
   }
@@ -873,15 +874,15 @@ export class CSV<T extends Record<string, any>> {
   ): CSV<T> {
     try {
       // Set columns: true by default to ensure consistent behavior, then allow user overrides
-      const csvOptions = { 
+      const csvOptions = {
         columns: true,
-        ...options.csvOptions 
+        ...options.csvOptions
       };
       let dataAfterCsvParse = parseCSV(csvString, csvOptions) as any[];
-      
+
       // Process the data with the shared function
       const parsedData = this.processCSVData<T>(dataAfterCsvParse, options);
-      
+
       // Apply schema validation if configured
       if (options.schema && parsedData.length > 0) {
         // If schema specifies async validation, throw an error as fromString is synchronous
@@ -890,22 +891,22 @@ export class CSV<T extends Record<string, any>> {
             "Asynchronous schema validation is not supported in fromString. Use fromFileAsync or validateAsync instead, or set useAsync: false in your schema configuration."
           );
         }
-        
+
         // Ensure synchronous validation is used
         const syncSchema: CSVSchemaConfig<T> = {
           ...options.schema,
           useAsync: false
         };
-        
+
         const [validatedData, validationResults] = this._validateWithSchemaSync(
-          parsedData, 
+          parsedData,
           syncSchema
         );
-        
+
         // Return validated data and include validation results
         return new CSV<T>(validatedData, undefined, validationResults);
       }
-      
+
       return new CSV<T>(parsedData as T[]);
     } catch (error) {
       throw new CSVError('Failed to parse CSV string', error instanceof Error ? error : new Error(String(error)));
@@ -925,16 +926,16 @@ export class CSV<T extends Record<string, any>> {
   ): Promise<CSV<T>> {
     try {
       // Handle the case where options is just simple options
-      const readOptions: CSVReadOptions<T> = 'csvOptions' in options 
-        ? options as CSVReadOptions<T> 
+      const readOptions: CSVReadOptions<T> = 'csvOptions' in options
+        ? options as CSVReadOptions<T>
         : { csvOptions: options } as CSVReadOptions<T>;
-      
+
       // Consistent approach: Set columns: true by default for proper object-based parsing
-      const csvParseOptions = { 
+      const csvParseOptions = {
         columns: true,
         ...(readOptions.csvOptions || {})
       };
-      
+
       return new Promise((resolve, reject) => {
         const data: any[] = [];
         const parser = parseCSVAsync(csvParseOptions);
@@ -954,15 +955,15 @@ export class CSV<T extends Record<string, any>> {
           try {
             // Process the data with the shared function (apply header mapping and custom casting)
             const processedData = this.processCSVData<T>(data, readOptions as CSVReadOptions<T & Record<string, any>>);
-            
+
             // Apply schema validation if configured
             if (readOptions.schema && processedData.length > 0) {
               try {
                 const [validatedData, validationResults] = this._validateWithSchema(
-                  processedData, 
+                  processedData,
                   readOptions.schema
                 );
-                
+
                 // Return validated data and include validation results
                 resolve(new CSV<T>(validatedData, undefined, validationResults));
               } catch (validationError) {
@@ -998,7 +999,7 @@ export class CSV<T extends Record<string, any>> {
     try {
       const resolvedPath = path.resolve(filename);
       const stream = fs.createReadStream(resolvedPath, options.fsOptions);
-      
+
       // Check if the schema might need async validation
       if (options.schema && options.schema.useAsync === undefined) {
         // Set useAsync to true for fromFileAsync to ensure proper handling of potentially async schemas
@@ -1006,19 +1007,19 @@ export class CSV<T extends Record<string, any>> {
           ...options.schema,
           useAsync: true
         };
-        
+
         // Pass the options to fromStream with updated schema
-        return CSV.fromStream<T>(stream, { 
-          ...options, 
+        return CSV.fromStream<T>(stream, {
+          ...options,
           csvOptions: options.csvOptions || { columns: true },
           schema: schemaWithAsyncOption
         });
       }
-      
+
       // Pass the options to fromStream as csvOptions to ensure it has the right type
-      return CSV.fromStream<T>(stream, { 
-        csvOptions: options.csvOptions || { columns: true }, 
-        ...options 
+      return CSV.fromStream<T>(stream, {
+        csvOptions: options.csvOptions || { columns: true },
+        ...options
       });
     } catch (error) {
       throw new CSVError(
@@ -1076,11 +1077,11 @@ export class CSV<T extends Record<string, any>> {
           // Use streaming for large datasets with header mapping
           const headerToPrepend = options.additionalHeader ?? this.additionalHeader ?? '';
           const writable = fs.createWriteStream(outputPath, { encoding: 'utf-8' });
-          
+
           if (headerToPrepend) {
             writable.write(headerToPrepend);
           }
-          
+
           // Create transform stream for header mapping
           const headerMapTransform = new Transform({
             objectMode: true,
@@ -1093,43 +1094,43 @@ export class CSV<T extends Record<string, any>> {
               }
             }
           });
-          
+
           // Create stringifier with appropriate options
           // If header is true, make sure it's handled correctly in stringifyOptions
           const csvStringifyOptions = {
             ...stringifyOptions,
             header: Array.isArray(stringifyOptions.header) ? headers : stringifyOptions.header
           };
-          
+
           // Create a transform stream using stringifyCSVAsync 
           // Use a type assertion to help TypeScript understand this is valid
           // The CSV module expects options as the first argument
           // The 'as any' casting is necessary because csvStringifyOptions' structure (with header property that 
           // could be boolean or string[]) may not perfectly align with stringifyCSVAsync's expected type
           const stringifier = stringifyCSVAsync(csvStringifyOptions as any) as Transform;
-          
+
           // Add a simple error handler to the stringifier
           stringifier.on('error', (err) => {
             console.error('CSV stringification error:', err);
           });
-          
+
           // Create pipeline
           Readable.from(this.data)
             .pipe(headerMapTransform)
             .pipe(stringifier)
             .pipe(writable);
-          
+
           return;
         } else {
           // Standard in-memory processing for smaller datasets
           // Transform the data through the header map
           const rows = this.data.map(item => toRowArr(item, headers));
-  
+
           // Add headers as the first row if needed
           if (stringifyOptions.header === true) {
             rows.unshift(headers);
           }
-  
+
           // Use a custom stringifier without the header option since we've manually handled it
           const csvString = rows.map(row =>
             row.map(cell => {
@@ -1139,7 +1140,7 @@ export class CSV<T extends Record<string, any>> {
                 : String(cell);
             }).join(',')
           ).join('\n');
-  
+
           fs.writeFileSync(
             outputPath,
             (options.additionalHeader ?? this.additionalHeader ?? '') + csvString,
@@ -1282,7 +1283,7 @@ export class CSV<T extends Record<string, any>> {
   toArray(): T[] {
     return [...this.data];
   }
-  
+
   /**
    * Validates the CSV data against a schema using synchronous validation
    * @param schema The schema configuration to use for validation
@@ -1293,29 +1294,29 @@ export class CSV<T extends Record<string, any>> {
     if (this.data.length === 0) {
       return new CSV<U>([], this.additionalHeader);
     }
-    
+
     // Ensure schema uses sync validation
     const syncSchema: CSVSchemaConfig<U> = {
       ...schema,
       useAsync: false // Force synchronous validation
     };
-    
+
     try {
       const [validatedData, validationResults] = CSV._validateWithSchemaSync<U>(
-        this.data, 
+        this.data,
         syncSchema
       );
-      
+
       return new CSV<U>(validatedData, this.additionalHeader, validationResults);
     } catch (error) {
       // Propagate any validation errors
       throw error instanceof CSVError ? error : new CSVError(
-        'Schema validation failed', 
+        'Schema validation failed',
         error instanceof Error ? error : new Error(String(error))
       );
     }
   }
-  
+
   /**
    * Validates the CSV data asynchronously against a schema
    * @param schema The schema configuration to use for validation
@@ -1325,30 +1326,30 @@ export class CSV<T extends Record<string, any>> {
     if (this.data.length === 0) {
       return new CSV<U>([], this.additionalHeader);
     }
-    
+
     // Ensure schema uses async validation
     const asyncSchema: CSVSchemaConfig<U> = {
       ...schema,
       useAsync: true // Force async validation
     };
-    
+
     try {
       // Use the internal async validation method
       const [validatedData, validationResults] = await CSV._validateWithSchemaAsync<U>(
-        this.data, 
+        this.data,
         asyncSchema
       );
-      
+
       return new CSV<U>(validatedData, this.additionalHeader, validationResults);
     } catch (error) {
       // Propagate any validation errors
       throw error instanceof CSVError ? error : new CSVError(
-        'Async schema validation failed', 
+        'Async schema validation failed',
         error instanceof Error ? error : new Error(String(error))
       );
     }
   }
-  
+
   /**
    * Asynchronously validates data using a standard schema configuration.
    * This method properly awaits promises from validateRowAsync before processing results.
@@ -1376,14 +1377,14 @@ export class CSV<T extends Record<string, any>> {
     const { rowSchema, columnSchemas, validationMode = 'error' } = schemaConfig;
     const validationResults: RowValidationResult<T>[] = [];
     const validatedData: T[] = [];
-    
+
     // Function to validate a row asynchronously
     const validateRowAsync = async (row: Record<string, any>, index: number): Promise<RowValidationResult<T>> => {
       const result: RowValidationResult<T> = {
         originalRow: row,
         valid: true
       };
-      
+
       // Validate row using row schema if provided
       if (rowSchema) {
         const rowValidation = await tryValidateStandardSchemaAsync(rowSchema, row);
@@ -1397,32 +1398,32 @@ export class CSV<T extends Record<string, any>> {
         // If no row schema, original row is the validated row
         result.validatedRow = row as T;
       }
-      
+
       // Validate individual columns if provided
       if (columnSchemas) {
         result.columnIssues = {};
-        
+
         // Validate columns in parallel
         const columnEntries = Object.entries(columnSchemas);
         const columnValidationPromises = columnEntries.map(async ([column, schema]) => {
           if (!schema) return null;
-          
+
           const columnValidation = await tryValidateStandardSchemaAsync(schema, row[column]);
           return { column, columnValidation };
         });
-        
+
         const columnResults = await Promise.all(columnValidationPromises);
-        
+
         // Process column validation results
         for (const columnResult of columnResults) {
           if (!columnResult) continue;
-          
+
           const { column, columnValidation } = columnResult;
-          
+
           if (columnValidation.issues) {
             result.valid = false;
             result.columnIssues[column] = [...columnValidation.issues];
-            
+
             // If row validation succeeded but column validation failed, update the column value in validated row
             if (result.validatedRow && !result.rowIssues) {
               if ('value' in columnValidation) {
@@ -1437,40 +1438,40 @@ export class CSV<T extends Record<string, any>> {
             (result.validatedRow as any)[column] = columnValidation.value;
           }
         }
-        
+
         // If no column issues, remove the empty object
         if (Object.keys(result.columnIssues).length === 0) {
           delete result.columnIssues;
         }
       }
-      
+
       return result;
     };
-    
+
     // Process all rows asynchronously in parallel
     const rowValidationPromises = data.map((row, index) => validateRowAsync(row, index));
     const results = await Promise.all(rowValidationPromises);
-    
+
     // Process validation results
     for (const result of results) {
       validationResults.push(result);
-      
+
       if (result.valid && result.validatedRow) {
         validatedData.push(result.validatedRow);
       } else if (validationMode === 'error') {
         // Collect all validation issues for better error reporting
         const issues: string[] = [];
-        
+
         if (result.rowIssues) {
           issues.push(`Row validation issues: ${result.rowIssues.map(i => i.message).join(', ')}`);
         }
-        
+
         if (result.columnIssues) {
           for (const [column, columnIssues] of Object.entries(result.columnIssues)) {
             issues.push(`Column '${column}' validation issues: ${columnIssues.map(i => i.message).join(', ')}`);
           }
         }
-        
+
         throw new CSVError(`CSV validation failed: ${issues.join('; ')}`);
       } else if (validationMode === 'filter') {
         // Skip invalid rows - don't add to validatedData
@@ -1480,7 +1481,7 @@ export class CSV<T extends Record<string, any>> {
         validatedData.push(result.originalRow as T);
       }
     }
-    
+
     return [validatedData, validationResults];
   }
 
@@ -1499,7 +1500,7 @@ export class CSV<T extends Record<string, any>> {
       // Handle object with headerMap
       const headerMap = options.headerMap;
       const stringifyOptions = options.stringifyOptions || { header: true };
-      
+
       if (headerMap) {
         const headers = Array.isArray(stringifyOptions.header)
           ? stringifyOptions.header
@@ -1525,7 +1526,7 @@ export class CSV<T extends Record<string, any>> {
           }).join(',')
         ).join('\n');
       }
-      
+
       // If headerMap is not provided, use standard stringify with stringifyOptions
       return stringifyCSV(this.data, stringifyOptions);
     }
@@ -1536,7 +1537,7 @@ export class CSV<T extends Record<string, any>> {
       return stringifyCSV(this.data, options.stringifyOptions || { header: true });
     }
     // Handle case when options is a direct stringify options object
-    return stringifyCSV(this.data, options  as Parameters<typeof stringifyCSV>[1] || { header: true });
+    return stringifyCSV(this.data, options as Parameters<typeof stringifyCSV>[1] || { header: true });
   }
 
   /**
@@ -1782,35 +1783,231 @@ export class CSV<T extends Record<string, any>> {
         return direction === 'asc' ? comparison : -comparison;
       });
     };
-    
+
     return new CSV<T>(sortFunction(this.data), this.additionalHeader);
   }
-  
+
   /**
-   * Asynchronous wrapper around sortBy for API consistency
-   * 
-   * Note: This method currently just delegates to the synchronous sortBy method.
-   * It does not perform a true parallel sort, as that would require implementing a proper
-   * merge step after sorting chunks in parallel (which is complex).
-   * 
-   * Future versions may implement a true parallel merge sort algorithm.
-   * 
-   * DESIGN NOTE: We intentionally avoid using CSVUtils.processInParallel here as it would
-   * not produce a fully sorted result. That method processes chunks independently and
-   * concatenates results without a proper merge step, which doesn't work for sorting operations.
-   * 
-   * @param column - The column to sort by
-   * @param direction - Sort direction (default: 'asc')
-   * @returns Promise resolving to a new CSV instance with sorted data
+  * Default threshold for using worker threads for sorting.
+  * If data length exceeds this, parallel sorting is attempted.
+  */
+  static DEFAULT_SORT_WORKER_THRESHOLD = 10000; // Adjust as needed
+
+  /**
+   * Asynchronously sorts rows by a column or a custom sort function.
+   * For large datasets (above `options.workerThreshold`), it attempts to use worker threads
+   * for parallel sorting of chunks, followed by a k-way merge.
+   *
+   * @param columnOrFn - The column key (keyof T) to sort by, or a custom comparison function
+   *                     `(a: T, b: T) => number` compatible with `Array.prototype.sort`.
+   *                     If a column key is provided, a default string/number-aware comparison is used.
+   *                     If a custom function is provided AND workers are used, the function's
+   *                     `toString()` representation will be sent to workers (requires `eval`).
+   * @param direction - Sort direction ('asc' or 'desc'). Only applies if `columnOrFn` is a column key.
+   *                    Ignored if `columnOrFn` is a custom comparison function.
+   * @param options - Optional configuration for asynchronous sorting.
+   * @param options.workerThreshold - Number of rows above which to attempt using worker threads.
+   *                                  Defaults to `CSV.DEFAULT_SORT_WORKER_THRESHOLD`.
+   * @param options.maxWorkers - Maximum number of worker threads to use. Defaults to CPU core count.
+   * @returns A Promise resolving to a new CSV instance with sorted data.
    */
   async sortByAsync<K extends keyof T>(
-    column: K,
-    direction: SortDirection = 'asc'
+    columnOrFn: K | ((a: T, b: T) => number),
+    direction: SortDirection = 'asc',
+    options: { workerThreshold?: number; maxWorkers?: number } = {}
   ): Promise<CSV<T>> {
-    // This is simply an async wrapper around the synchronous method
-    // for API consistency. In a future version, this could be enhanced
-    // with a true parallel merge sort implementation.
-    return this.sortBy(column, direction);
+    if (this.data.length === 0) {
+      return new CSV<T>([], this.additionalHeader, this.validationResults);
+    }
+
+    const workerThreshold = options.workerThreshold ?? CSV.DEFAULT_SORT_WORKER_THRESHOLD;
+
+    // Determine the comparison function
+    let compareFn: (a: T, b: T) => number;
+    let sortFnStringToWorker: string | undefined = undefined;
+
+    if (typeof columnOrFn === 'function') {
+      compareFn = columnOrFn;
+      // For workers, we'll try to send the function as a string.
+      // This has limitations (closures, non-serializable context won't work).
+      // And uses eval in the worker, which has security implications.
+      sortFnStringToWorker = columnOrFn.toString();
+    } else {
+      const column = columnOrFn; // It's a keyof T
+      compareFn = (a: T, b: T): number => {
+        const aVal = a[column];
+        const bVal = b[column];
+
+        // Consistent handling of null/undefined: nulls/undefineds come first in asc, last in desc
+        if (aVal === bVal) return 0;
+        if (aVal === null || aVal === undefined) return direction === 'asc' ? -1 : 1;
+        if (bVal === null || bVal === undefined) return direction === 'asc' ? 1 : -1;
+
+        if (typeof aVal === 'number' && typeof bVal === 'number') {
+          return direction === 'asc' ? aVal - bVal : bVal - aVal;
+        }
+        // Default to string comparison for other types
+        const comparison = String(aVal).localeCompare(String(bVal));
+        return direction === 'asc' ? comparison : -comparison;
+      };
+    }
+
+    // If data size is below threshold or only 1 CPU, sort in the main thread
+    const numCPUs = os.cpus().length;
+    if (this.data.length <= workerThreshold || numCPUs <= 1) {
+      // console.log('Sorting in main thread');
+      const sortedData = [...this.data].sort(compareFn);
+      return new CSV<T>(sortedData, this.additionalHeader, this.validationResults);
+    }
+
+    // --- Parallel Sorting with Workers ---
+    // console.log('Attempting parallel sort');
+    const maxWorkers = Math.min(options.maxWorkers || numCPUs, numCPUs);
+    const chunkSize = Math.ceil(this.data.length / maxWorkers);
+    const chunks: T[][] = [];
+
+    for (let i = 0; i < this.data.length; i += chunkSize) {
+      chunks.push(this.data.slice(i, i + Math.min(chunkSize, this.data.length - i)));
+    }
+
+    const workerPromises = chunks.map((chunk, index) => {
+      return new Promise<T[]>((resolve, reject) => {
+        const worker = new Worker(`
+  const { parentPort, workerData } = require('worker_threads');
+
+  const { chunk, column, direction, sortFnString } = workerData;
+
+  // Reconstruct the sort function (be cautious with eval in production)
+  // A safer way would be to pass only primitive comparators or have predefined sort strategies.
+  let compareFn;
+  if (sortFnString) {
+    try {
+      const dynamicallyCreatedSortFn = eval('(' + sortFnString + ')');
+      compareFn = (a, b) => dynamicallyCreatedSortFn(a, b, column, direction);
+    } catch (e) {
+      parentPort.postMessage({ error: 'Failed to evaluate sortFnString: ' + e.message });
+      return;
+    }
+  } else {
+    // Default comparator if no custom function string is provided
+    compareFn = (a, b) => {
+      const aVal = a[column];
+      const bVal = b[column];
+
+      if (aVal === bVal) return 0;
+      if (aVal === null || aVal === undefined) return direction === 'asc' ? -1 : 1;
+      if (bVal === null || bVal === undefined) return direction === 'asc' ? 1 : -1;
+      
+      if (typeof aVal === 'number' && typeof bVal === 'number') {
+        return direction === 'asc' ? aVal - bVal : bVal - aVal;
+      }
+      const comparison = String(aVal).localeCompare(String(bVal));
+      return direction === 'asc' ? comparison : -comparison;
+    };
+  }
+
+  try {
+    chunk.sort(compareFn);
+    parentPort.postMessage({ sortedChunk: chunk });
+  } catch (e) {
+    parentPort.postMessage({ error: 'Error during sort in worker: ' + e.message });
+  }
+`, { 
+          eval: true, // Necessary for the inline string worker
+          workerData: {
+            chunk,
+            column: typeof columnOrFn !== 'function' ? columnOrFn : undefined, // Only pass column if not custom fn
+            direction,
+            sortFnString: sortFnStringToWorker, // Pass the function string
+          },
+        });
+
+        worker.on('message', (message) => {
+          if (message.error) {
+            reject(new CSVError(`Worker sort error (chunk ${index}): ${message.error}`, message.error));
+          } else if (message.sortedChunk) {
+            resolve(message.sortedChunk);
+          } else {
+            reject(new CSVError(`Worker ${index} sent unknown message.`));
+          }
+          worker.terminate();
+        });
+        worker.on('error', (err) => {
+          reject(new CSVError(`Worker ${index} encountered an error: ${err.message}`, err));
+          worker.terminate();
+        });
+        worker.on('exit', (code) => {
+          if (code !== 0) {
+            // This might be redundant if 'error' or 'message.error' already rejected
+            // reject(new CSVError(`Worker ${index} exited with code ${code}`));
+          }
+        });
+      });
+    });
+
+    try {
+      const sortedChunks = await Promise.all(workerPromises);
+      // Now, merge the sorted chunks
+      const mergedData = this.kWayMerge(sortedChunks, compareFn);
+      return new CSV<T>(mergedData, this.additionalHeader, this.validationResults);
+    } catch (error) {
+      console.error("Error during parallel sort:", error);
+      // Fallback: sort in main thread if workers fail catastrophically
+      // (Or rethrow, depending on desired robustness vs. performance guarantee)
+      console.warn("Parallel sort failed, falling back to main thread sort.");
+      const sortedData = [...this.data].sort(compareFn);
+      return new CSV<T>(sortedData, this.additionalHeader, this.validationResults);
+    }
+  }
+
+  /**
+   * Performs a k-way merge on multiple sorted arrays (chunks).
+   * This is a helper for `sortByAsync`.
+   *
+   * @param arrays - An array of arrays, where each inner array is already sorted
+   *                 according to the `compareFn`.
+   * @param compareFn - The comparison function used to sort the arrays and to merge them.
+   * @returns A single sorted array containing all elements from the input arrays.
+   * @private
+   */
+  private kWayMerge(arrays: T[][], compareFn: (a: T, b: T) => number): T[] {
+    if (!arrays || arrays.length === 0) return [];
+    if (arrays.length === 1) return arrays[0];
+
+    // This is a basic iterative merge. For a large number of arrays (k),
+    // a min-heap based k-way merge would be more efficient.
+    let result = arrays[0];
+    for (let i = 1; i < arrays.length; i++) {
+      result = this.mergeTwoSortedArrays(result, arrays[i], compareFn);
+    }
+    return result;
+  }
+
+  /**
+   * Merges two already sorted arrays into a single sorted array.
+   * @param arr1 - First sorted array.
+   * @param arr2 - Second sorted array.
+   * @param compareFn - Comparison function.
+   * @returns A new sorted array containing elements from arr1 and arr2.
+   * @private
+   */
+  private mergeTwoSortedArrays(arr1: T[], arr2: T[], compareFn: (a: T, b: T) => number): T[] {
+    const merged: T[] = [];
+    let i = 0, j = 0;
+    while (i < arr1.length && j < arr2.length) {
+      if (compareFn(arr1[i], arr2[j]) <= 0) {
+        merged.push(arr1[i++]);
+      } else {
+        merged.push(arr2[j++]);
+      }
+    }
+    while (i < arr1.length) {
+      merged.push(arr1[i++]);
+    }
+    while (j < arr2.length) {
+      merged.push(arr2[j++]);
+    }
+    return merged;
   }
 
   /**
@@ -1898,7 +2095,7 @@ export class CSV<T extends Record<string, any>> {
   ): CSV<T> {
     const otherData = other instanceof CSV ? other.toArray() : other;
     const result: T[] = [];
-    
+
     // Use a more efficient algorithm by creating an index for faster lookups
     // We'll use a Map to group otherData items by their key characteristics
     // This is a heuristic that may not work for all equality functions, but works for many common cases
@@ -1910,7 +2107,7 @@ export class CSV<T extends Record<string, any>> {
         .map(([k, v]) => `${k}:${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
         .join('|');
     };
-    
+
     // Index the other array for faster lookups
     const otherMap = new Map<string, E[]>();
     for (const itemB of otherData) {
@@ -1920,20 +2117,20 @@ export class CSV<T extends Record<string, any>> {
       }
       otherMap.get(key)!.push(itemB);
     }
-    
+
     // Track processed items from both arrays
     const processedB = new Set<E>();
-    
+
     // First pass: find matches and merge them
     for (const itemA of this.data) {
       const key = createKey(itemA);
       const potentialMatches = otherMap.get(key) || [];
       let matched = false;
-      
+
       // Only iterate through potential matches that share the same key
       for (const itemB of potentialMatches) {
         if (processedB.has(itemB)) continue;
-        
+
         if (equalityFn(itemA, itemB)) {
           result.push(mergeFn(itemA, itemB));
           processedB.add(itemB);
@@ -1941,20 +2138,20 @@ export class CSV<T extends Record<string, any>> {
           break;
         }
       }
-      
+
       // If no match found, add the item from A
       if (!matched) {
         result.push({ ...itemA });
       }
     }
-    
+
     // Add remaining items from B that weren't matched
     for (const itemB of otherData) {
       if (!processedB.has(itemB)) {
         result.push({ ...(itemB as unknown as T) });
       }
     }
-    
+
     return new CSV<T>(result, this.additionalHeader);
   }
 
@@ -1980,7 +2177,7 @@ export class CSV<T extends Record<string, any>> {
   ): Promise<void> {
     const batchSize = options.batchSize || 1;
     const batchConcurrency = options.batchConcurrency || 1;
-    
+
     if (batchSize <= 1 && batchConcurrency <= 1) {
       // Original sequential processing
       for (let i = 0; i < this.data.length; i++) {
@@ -1988,23 +2185,23 @@ export class CSV<T extends Record<string, any>> {
       }
       return;
     }
-    
+
     // Process data in batches with concurrency
     const batches: T[][] = [];
     for (let i = 0; i < this.data.length; i += batchSize) {
       batches.push(this.data.slice(i, i + batchSize));
     }
-    
+
     // Process batches with controlled concurrency
     for (let i = 0; i < batches.length; i += batchConcurrency) {
       const batchPromises = batches.slice(i, i + batchConcurrency).map(async (batch, batchIndex) => {
         const startIdx = i * batchSize + batchIndex * batchSize;
-        const promises = batch.map((row, rowIndex) => 
+        const promises = batch.map((row, rowIndex) =>
           callback(row, startIdx + rowIndex)
         );
         await Promise.all(promises);
       });
-      
+
       await Promise.all(batchPromises);
     }
   }
@@ -2032,7 +2229,7 @@ export class CSV<T extends Record<string, any>> {
   ): Promise<R[]> {
     const batchSize = options.batchSize || 1;
     const batchConcurrency = options.batchConcurrency || 1;
-    
+
     if (batchSize <= 1 && batchConcurrency <= 1) {
       // Original sequential processing
       const results: R[] = [];
@@ -2041,16 +2238,16 @@ export class CSV<T extends Record<string, any>> {
       }
       return results;
     }
-    
+
     // Process data in batches with concurrency
     const batches: T[][] = [];
     for (let i = 0; i < this.data.length; i += batchSize) {
       batches.push(this.data.slice(i, i + batchSize));
     }
-    
+
     // Create a sparse array to maintain order after parallel processing
     const results: R[] = new Array(this.data.length);
-    
+
     // Process batches with controlled concurrency
     for (let i = 0; i < batches.length; i += batchConcurrency) {
       const batchPromises = batches.slice(i, i + batchConcurrency).map(async (batch, batchIndex) => {
@@ -2058,16 +2255,16 @@ export class CSV<T extends Record<string, any>> {
         const batchResults = await Promise.all(
           batch.map((row, rowIndex) => callback(row, startIdx + rowIndex))
         );
-        
+
         // Insert batch results at the right position
         batchResults.forEach((result, resultIndex) => {
           results[startIdx + resultIndex] = result;
         });
       });
-      
+
       await Promise.all(batchPromises);
     }
-    
+
     return results;
   }
 
@@ -2103,14 +2300,14 @@ export class CSV<T extends Record<string, any>> {
   async reduceAsync<R>(
     callback: (accumulator: R, row: T, index: number) => Promise<R>,
     initialValue: R,
-    options: { 
+    options: {
       strategy?: 'sequential' | 'mapreduce';
-      batchSize?: number; 
+      batchSize?: number;
     } = {}
   ): Promise<R> {
     const batchSize = options.batchSize || 20;
     const strategy = options.strategy || 'sequential';
-    
+
     // Simple sequential case for small datasets or when not optimizing
     if (this.data.length <= batchSize || batchSize <= 1) {
       let result = initialValue;
@@ -2119,63 +2316,63 @@ export class CSV<T extends Record<string, any>> {
       }
       return result;
     }
-    
+
     if (strategy === 'sequential') {
       // Sequential with batched preprocessing optimization
       // This helps when preprocessing your data is expensive but the reduction is order-dependent
       let result = initialValue;
-      
+
       // Process data in batches
       const batches: T[][] = [];
       for (let i = 0; i < this.data.length; i += batchSize) {
         batches.push(this.data.slice(i, i + batchSize));
       }
-      
+
       for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
         const batch = batches[batchIndex];
         const baseIndex = batchIndex * batchSize;
-        
+
         // Process the batch sequentially but with possible preprocessing optimizations
         for (let i = 0; i < batch.length; i++) {
           result = await callback(result, batch[i], baseIndex + i);
         }
       }
-      
+
       return result;
     } else if (strategy === 'mapreduce') {
       // Map-reduce style parallel processing
       // This requires an associative and commutative reducer and is more efficient for large datasets
-      
+
       // Create batches
       const batches: T[][] = [];
       for (let i = 0; i < this.data.length; i += batchSize) {
         batches.push(this.data.slice(i, i + batchSize));
       }
-      
+
       // First, reduce each batch in parallel (map phase)
       const batchResults = await Promise.all(
         batches.map(async (batch, batchIndex) => {
           const baseIndex = batchIndex * batchSize;
           let batchResult = initialValue;
-          
+
           for (let i = 0; i < batch.length; i++) {
             batchResult = await callback(batchResult, batch[i], baseIndex + i);
           }
-          
+
           return batchResult;
         })
       );
-      
+
       // Then, reduce the batch results (reduce phase)
       let finalResult = initialValue;
       for (const batchResult of batchResults) {
         // We use a dummy index here since we're reducing already-reduced results
         finalResult = await callback(finalResult, batchResult as unknown as T, -1);
       }
-      
+
       return finalResult;
     }
-    
+
     // Fallback to standard sequential processing
     let result = initialValue;
     for (let i = 0; i < this.data.length; i++) {
@@ -3326,7 +3523,7 @@ export const CSVUtils = {
       }
     });
   },
-  
+
   /**
    * Execute a CPU-intensive operation in a worker thread to avoid blocking the main thread
    * @param operation - Function that defines the operation to execute (must be serializable)
@@ -3367,7 +3564,7 @@ export const CSVUtils = {
           }
         }
       );
-      
+
       // Handle message from worker
       worker.on('message', (message) => {
         if (message.success) {
@@ -3379,10 +3576,10 @@ export const CSVUtils = {
           reject(error);
         }
       });
-      
+
       // Handle worker errors
       worker.on('error', reject);
-      
+
       // Handle worker exit
       worker.on('exit', (code) => {
         if (code !== 0) {
@@ -3391,7 +3588,7 @@ export const CSVUtils = {
       });
     });
   },
-  
+
   /**
    * Process data in parallel across multiple worker threads
    * @param items - Array of items to process
@@ -3414,30 +3611,30 @@ export const CSVUtils = {
     options: { maxWorkers?: number; chunkSize?: number } = {}
   ): Promise<R[]> {
     if (items.length === 0) return [];
-    
+
     // Determine the number of workers
     const cpuCount = require('os').cpus().length;
     const maxWorkers = options.maxWorkers || cpuCount;
     const workerCount = Math.min(maxWorkers, items.length, cpuCount);
-    
+
     // If only a few items or just one worker, process directly
     if (workerCount <= 1 || items.length <= 10) {
       return operation(items);
     }
-    
+
     // Split items into chunks
     const chunks: T[][] = [];
     const chunkSize = options.chunkSize || Math.ceil(items.length / workerCount);
-    
+
     for (let i = 0; i < items.length; i += chunkSize) {
       chunks.push(items.slice(i, i + chunkSize));
     }
-    
+
     // Process each chunk in a separate worker
-    const promises = chunks.map(chunk => 
+    const promises = chunks.map(chunk =>
       this.processInWorker(operation, chunk)
     );
-    
+
     // Combine results
     const results = await Promise.all(promises);
     return results.flat();
@@ -4116,7 +4313,7 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
    * @param bufferSize The maximum number of items to keep in memory (default: 1000)
    */
   private async *_yieldFromStream(
-    stream: Readable, 
+    stream: Readable,
     bufferSize: number = 1000
   ): AsyncGenerator<OutType, void, undefined> {
     // Create a fixed-size circular buffer to limit memory usage
@@ -4150,7 +4347,7 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
           this.head = (this.head + 1) % this.capacity;
           this._size--;
         }
-        
+
         this.buffer[this.tail] = item;
         this.tail = (this.tail + 1) % this.capacity;
         this._size++;
@@ -4158,12 +4355,12 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
 
       shift(): T | undefined {
         if (this.isEmpty) return undefined;
-        
+
         const item = this.buffer[this.head];
         this.buffer[this.head] = undefined; // Help GC
         this.head = (this.head + 1) % this.capacity;
         this._size--;
-        
+
         return item;
       }
 
@@ -4185,32 +4382,32 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
     // Set up stream handlers
     const onData = (chunk: OutType) => {
       dataBuffer.push(chunk);
-      
+
       // Apply backpressure if buffer is getting full
       if (!backpressureApplied && dataBuffer.size >= bufferSize * 0.8) {
         backpressureApplied = true;
         stream.pause();
       }
-      
-      if (waitingForDataResolver) { 
-        waitingForDataResolver(); 
-        waitingForDataResolver = null; 
+
+      if (waitingForDataResolver) {
+        waitingForDataResolver();
+        waitingForDataResolver = null;
       }
     };
-    
+
     const onEnd = () => {
       streamEnded = true;
-      if (waitingForDataResolver) { 
-        waitingForDataResolver(); 
-        waitingForDataResolver = null; 
+      if (waitingForDataResolver) {
+        waitingForDataResolver();
+        waitingForDataResolver = null;
       }
     };
-    
+
     const onError = (err: Error) => {
       streamError = err;
-      if (waitingForDataResolver) { 
-        waitingForDataResolver(); 
-        waitingForDataResolver = null; 
+      if (waitingForDataResolver) {
+        waitingForDataResolver();
+        waitingForDataResolver = null;
       }
     };
 
@@ -4221,14 +4418,14 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
     try {
       while (true) {
         if (streamError) throw streamError;
-        
+
         if (!dataBuffer.isEmpty) {
           // If buffer was full and now has room, resume the stream
           if (backpressureApplied && dataBuffer.size < bufferSize * 0.5) {
             backpressureApplied = false;
             stream.resume();
           }
-          
+
           yield dataBuffer.shift()!;
         } else if (streamEnded) {
           return;
@@ -4245,11 +4442,11 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
       stream.off('data', onData);
       stream.off('end', onEnd);
       stream.off('error', onError);
-      
+
       if (!stream.destroyed && !stream.readableEnded) {
         stream.destroy();
       }
-      
+
       // Clear buffer to help GC
       dataBuffer.clear();
     }
