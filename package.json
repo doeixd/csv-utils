@@ -1,6 +1,6 @@
 {
   "name": "@doeixd/csv-utils",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "files": [
     "dist",
     "src"

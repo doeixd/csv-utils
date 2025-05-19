@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [2.2.0](https://github.com/doeixd/csv-utils/compare/v2.1.1...v2.2.0) (2025-05-19)
+
+
+### Features
+
+* :sparkles: Implemented sortByAsync ([0dcf457](https://github.com/doeixd/csv-utils/commit/0dcf457b83081c3137eed29490de8bab36133583))
+
 ### [2.1.1](https://github.com/doeixd/csv-utils/compare/v2.1.0...v2.1.1) (2025-05-16)
 
 
