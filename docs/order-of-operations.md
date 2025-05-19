@@ -49,44 +49,51 @@ Understanding the sequence in which configurations are applied during CSV readin
     *   The `validationMode` (`'error'`, `'filter'`, or `'keep'`) determines how rows failing validation are handled. If `'keep'`, `csvInstance.validationResults` will contain detailed information about validation issues.
 
 **Visualized Flow:**
-
 ```mermaid
-graph TD
-    A[Raw File/String Content] --> B{Preamble Extraction?};
-    B -- Yes --> C[Store Preamble];
-    C --> D_Preamble[Content for Parsing - After Preamble];
-    B -- No --> D_NoPreamble[Content for Parsing - No Preamble];
-    D_Preamble --> E_Input{options.transformRaw?};
-    D_NoPreamble --> E_Input;
 
-    E_Input -- Yes --> F[Apply Raw Transform];
-    F --> G_Transformed[Content to csv-parse - After Raw Transform];
-    E_Input -- No --> G_Untransformed[Content to csv-parse - No Raw Transform];
-    G_Transformed --> H[Core CSV Parsing (csv-parse)];
-    G_Untransformed --> H;
+flowchart TD
+    A[Raw File/String Content] --> B{Preamble Extraction?}
+    B -- Yes --> C[Store Preamble]
+    C --> D1[Content for Parsing - After Preamble]
+    B -- No --> D2[Content for Parsing - No Preamble]
+    D1 --> E{options.transformRaw?}
+    D2 --> E
+    
+    E -- Yes --> F[Apply Raw Transform]
+    F --> G1[Content after Raw Transform]
+    E -- No --> G2[Content without Transform]
+    G1 --> H[Core CSV Parsing]
+    G2 --> H
+    
+    H -- "csvOptions.columns=true" --> I[Initial Objects from csv-parse]
+    H -- "csvOptions.columns=false" --> J[Initial Arrays from csv-parse]
+    
+    I --> K{options.headerMap?}
+    K -- Yes --> L[Apply Header Mapping]
+    L --> N1[Mapped Objects]
+    K -- No --> N2[Objects from csv-parse]
+    N1 --> P
+    N2 --> P
+    
+    P{options.customCasts?} -- Yes --> Q[Apply Custom Casting]
+    Q --> R1[Objects after Custom Casting]
+    P -- No --> R2[Objects without Custom Casting]
+    R1 --> S
+    R2 --> S
+    
+    S{options.schema?} -- Yes --> T[Apply Schema Validation]
+    T --> U1[Final Processed Data with Validation]
+    S -- No --> U2[Final Processed Data without Validation]
+    
+    U1 --> V[CSV Instance]
+    U2 --> V
+    J --> V
 
-    H -- "csvOptions.columns=true" --> I[Initial Objects from csv-parse];
-    H -- "csvOptions.columns=false" --> J[Initial Arrays from csv-parse];
-
-    I --> K{options.headerMap?};
-    K -- Yes --> L[Apply Header Mapping];
-    L --> N_Mapped[Mapped Objects];
-    K -- No --> N_DirectObjects[Objects from csv-parse (No Header Map)];
-    N_DirectObjects --> P_InputCustomCast;
-    N_Mapped --> P_InputCustomCast;
-
-    P_InputCustomCast{options.customCasts?} -- Yes --> Q[Apply Custom Casting];
-    Q --> R_Casted[Objects after Custom Casting];
-    P_InputCustomCast -- No --> R_Uncasted[Objects (No Custom Casting)];
-    R_Casted --> S_InputSchema;
-    R_Uncasted --> S_InputSchema;
-
-    S_InputSchema{options.schema?} -- Yes --> T[Apply Schema Validation];
-    T --> U_Validated[Final Processed Data (Objects)];
-    S_InputSchema -- No --> U_Unvalidated[Final Processed Data (Objects - No Schema)];
-
-    U_Validated --> V[CSV<T> Instance];
-    U_Unvalidated --> V;
-
-    J --> V_Arrays[CSV<T> Instance (from Arrays)];
+    classDef optionNode fill:#f9f,stroke:#333,stroke-width:2px
+    classDef processNode fill:#bbf,stroke:#333,stroke-width:1px
+    classDef resultNode fill:#bfb,stroke:#333,stroke-width:1px
+    
+    class B,E,K,P,S optionNode
+    class C,F,H,L,Q,T processNode
+    class D1,D2,G1,G2,I,J,N1,N2,R1,R2,U1,U2,V resultNode
 ```
