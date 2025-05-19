@@ -1195,6 +1195,8 @@ const data = CSV.fromFile('data.csv');
 
 ### Important Note: Mutability and Query Results
 
+This library is not meant to be used in the browser, and used nodejs apis. 
+
 Many of the query methods in this library, such as `findRowWhere` and `findRowsWhere`, **return direct references to the objects within the CSV data**, rather than creating new copies. This design choice enhances performance and enables efficient in-place modifications, but it also introduces a potential pitfall.
 
 **Benefits of Mutability:**
