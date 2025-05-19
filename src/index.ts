@@ -23,6 +23,23 @@ export * from './schema'
 export * from './standalone'
 
 /**
+ * Options for creating a CSV instance from pre-existing data.
+ */
+export interface CSVFromDataOptions<T extends Record<string, any>> {
+  /**
+   * Schema to validate the provided data objects against.
+   * If schema validation fails and mode is 'error', an error will be thrown.
+   * If mode is 'filter', invalid objects will be removed.
+   * If mode is 'keep', validationResults will be populated on the CSV instance.
+   */
+  schema?: CSVSchemaConfig<T>;
+  // We are deliberately OMITTING customCasts here for fromData
+  // as their primary design is for string inputs from CSV parsing.
+  // Coercion of existing object properties should ideally be handled by
+  // the schema itself (e.g., Zod's coerce) or a separate transformation step.
+}
+
+/**
  * Error class for CSV-related operations
  */
 export class CSVError extends Error {
@@ -720,13 +737,62 @@ export class CSV<T extends Record<string, any>> {
     }
   }
 
+
   /**
-   * Create a CSV instance from raw data
-   * @param data - Array of objects representing CSV rows
-   * @returns A new CSV instance
+   * Create a CSV instance from an array of objects, with optional schema validation.
+   *
+   * @param data - Array of objects representing CSV-like rows.
+   * @param options - Optional configuration, primarily for schema validation.
+   * @returns A new CSV instance.
+   * @throws {CSVError} If schema validation is mode 'error' and fails, or if an async schema is used incorrectly.
    */
-  static fromData<T extends Record<string, any>>(data: T[]): CSV<T> {
-    return new CSV<T>(Array.isArray(data) ? [...data] : []);
+  static fromData<T extends Record<string, any>>(
+    data: (T |Record<string, any>)[], // Input can be Record<string, any> to allow for validation to type T
+    options?: CSVFromDataOptions<T>
+  ): CSV<T> {
+    // Create a new array with copies of the input objects to ensure immutability of the input `data` array
+    let processedData: Record<string, any>[] = Array.isArray(data) ? data.map(row => ({ ...row })) : [];
+    let finalAdditionalHeader: string | undefined = undefined; // Not applicable for fromData
+    let validationResults: RowValidationResult<T>[] | undefined = undefined;
+
+    // Apply schema validation if configured
+    if (options?.schema && processedData.length > 0) {
+      // If schema specifies async validation, throw an error as fromData is synchronous
+      if (options.schema.useAsync) {
+        throw new CSVError(
+          "Asynchronous schema validation is not supported in the synchronous fromData method. " +
+          "Validate separately using csvInstance.validateAsync() or ensure your schema and useAsync:false are set for synchronous validation."
+        );
+      }
+
+      // Ensure synchronous validation is used for this synchronous method
+      const syncSchema: CSVSchemaConfig<T> = {
+        ...options.schema,
+        useAsync: false, // Force synchronous validation path
+      };
+
+      try {
+        const [validatedDataOutput, valRes] = this._validateWithSchemaSync(
+          processedData, // Pass the current data
+          syncSchema
+        );
+        processedData = validatedDataOutput; // Update processedData with the validated (and possibly filtered/transformed) data
+        validationResults = valRes;
+      } catch (error) {
+        // _validateWithSchemaSync throws CSVError directly if validationMode is 'error' and a failure occurs.
+        // Re-throw if it's already a CSVError, otherwise wrap it.
+        if (error instanceof CSVError) {
+          throw error;
+        }
+        throw new CSVError(
+          'Schema validation failed during CSV.fromData',
+          error instanceof Error ? error : new Error(String(error))
+        );
+      }
+    }
+
+    // The final data should conform to T after validation (or be T[] if no validation)
+    return new CSV<T>(processedData as T[], finalAdditionalHeader, validationResults);
   }
 
   /**
@@ -1912,7 +1978,7 @@ export class CSV<T extends Record<string, any>> {
   } catch (e) {
     parentPort.postMessage({ error: 'Error during sort in worker: ' + e.message });
   }
-`, { 
+`, {
           eval: true, // Necessary for the inline string worker
           workerData: {
             chunk,
@@ -3440,24 +3506,47 @@ export const CSVUtils = {
    * @param mergeFn - Function to merge equal items
    * @returns A new array with merged items
    */
-  mergeRows<T extends Record<string, any>, E extends T & Record<string, any>>(
+  mergeRows<T extends Record<string, any>, E extends Record<string, any>>(
     arrayA: T[],
     arrayB: E[],
-    equalityFn: EqualityCallback<T | E>,
-    mergeFn: MergeCallback<T, E>
+    equalityFn: (a: T, b: E) => boolean,
+    mergeFn: (a: T, b: E) => T & Record<string, any>
   ): T[] {
-    return CSV.fromData(arrayA)
-      .mergeWith(arrayB, equalityFn, mergeFn)
+    const csvInstance = CSV.fromData<T>(arrayA);
+    return csvInstance
+      .mergeWith<E>(arrayB, 
+        (a, b) => equalityFn(a as T, b), 
+        (a, b) => mergeFn(a as T, b)
+      )
       .toArray();
   },
 
   /**
-   * Deep clone an object
+   * Deep clone an object. Prefers structuredClone if available,
+   * otherwise falls back to JSON.parse(JSON.stringify(obj)).
    * @param obj - The object to clone
    * @returns A deep copy of the object
    */
   clone<T>(obj: T): T {
-    return JSON.parse(JSON.stringify(obj));
+    const cloneWithJson = (item: T): T => {
+      // Handle null and undefined explicitly as JSON.stringify(undefined) is undefined
+      // and JSON.parse(undefined) would error.
+      if (item === undefined || item === null) {
+        return item;
+      }
+      return JSON.parse(JSON.stringify(item));
+    };
+
+    if (typeof globalThis?.structuredClone === 'function') {
+      try {
+        return globalThis.structuredClone(obj);
+      } catch (e) {
+        //console.warn("structuredClone failed, falling back to JSON method. Error:", e);
+        return cloneWithJson(obj);
+      }
+    } else {
+      return cloneWithJson(obj);
+    }
   },
 
   /**

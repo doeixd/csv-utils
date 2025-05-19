@@ -1,455 +1,345 @@
 # Data Validation in CSV Utils
 
-CSV Utils provides robust mechanisms for validating your CSV data to ensure its integrity and conformity to expected structures and types. Validation can be performed against individual columns or entire rows, using either the library's `StandardSchemaV1` interface or popular validation libraries like Zod.
+CSV Utils provides robust mechanisms for validating your CSV data, ensuring its integrity and conformity to your expected structures and types. Validation can be performed against individual columns or entire rows using any schema library that implements the **Standard Schema** specification (e.g., Zod 3.24+, Valibot, ArkType).
 
 ## Table of Contents
 
 -   [Why Validate CSV Data?](#why-validate-csv-data)
 -   [Core Validation Concepts](#core-validation-concepts)
+    -   [The Standard Schema Interface (`StandardSchemaV1`)](#the-standard-schema-interface-standardschemav1)
     -   [`CSVSchemaConfig<T>`](#csvschemaconfigt-options)
     -   [Validation Modes](#validation-modes)
     -   [Synchronous vs. Asynchronous Validation](#synchronous-vs-asynchronous-validation)
--   [Using `StandardSchemaV1`](#using-standardschemav1)
-    -   [Defining a `StandardSchemaV1` Object](#defining-a-standardschemav1-object)
-    -   [Example: Custom Column Validation](#example-custom-column-validation)
--   [Using Zod for Validation](#using-zod-for-validation)
-    -   [Installation](#installation)
+-   [Using Standard Schema Compliant Libraries (e.g., Zod)](#using-standard-schema-compliant-libraries-eg-zod)
     -   [Example: Row Validation with Zod](#example-row-validation-with-zod)
     -   [Example: Column Validation with Zod](#example-column-validation-with-zod)
-    -   [Coercion with Zod](#coercion-with-zod)
+    -   [Leveraging Coercion in Schema Libraries](#leveraging-coercion-in-schema-libraries)
+-   [Creating Custom `StandardSchemaV1` Objects (Advanced)](#creating-custom-standardschemav1-objects-advanced)
 -   [Applying Schemas](#applying-schemas)
     -   [During CSV Reading (`CSV.fromFile`, `CSV.fromString`, etc.)](#during-csv-reading)
-    *   [Using `csvInstance.validate()` or `csvInstance.validateAsync()`](#using-csvinstancevalidate-or-csvinstancevalidateasync)
+    -   [Using `csvInstance.validate()` or `csvInstance.validateAsync()`](#using-csvinstancevalidate-or-csvinstancevalidateasync)
 -   [Working with Validation Results (`validationMode: 'keep'`)](#working-with-validation-results-validationmode-keep)
     -   [`RowValidationResult<T>`](#rowvalidationresultt-interface)
     -   [Example: Inspecting Issues](#example-inspecting-issues)
--   [Common Scenarios and Best Practices](#common-scenarios-and-best-practices)
-    -   [Order of Operations: Casting vs. Validation](#order-of-operations-casting-vs-validation)
-    -   [Validating Numeric Ranges or String Patterns](#validating-numeric-ranges-or-string-patterns)
-    -   [Handling Optional Fields](#handling-optional-fields)
-    -   [Combining Column and Row Validations](#combining-column-and-row-validations)
-    -   [Performance Considerations](#performance-considerations)
+-   [Order of Operations: `customCasts` vs. Schema Validation](#order-of-operations-customcasts-vs-schema-validation)
+-   [Common Validation Scenarios & Best Practices](#common-validation-scenarios--best-practices)
 -   [Troubleshooting Validation](#troubleshooting-validation)
 
 ## Why Validate CSV Data?
 
-Real-world CSV files can be messy. Validation helps you:
+Real-world CSV files can be inconsistent. Validation helps you:
 
 *   **Ensure Data Quality:** Catch errors, inconsistencies, and unexpected formats early.
-*   **Maintain Type Safety:** Confirm that data can be correctly processed by your application logic.
+*   **Maintain Type Safety:** Confirm that data can be correctly processed by your application.
 *   **Prevent Downstream Errors:** Avoid issues in later stages of data processing or storage.
-*   **Enforce Business Rules:** Ensure data adheres to specific constraints (e.g., valid product SKUs, positive quantities).
+*   **Enforce Business Rules:** Ensure data adheres to specific constraints.
 
 ## Core Validation Concepts
 
-### `CSVSchemaConfig<T>` (Options)
+### The Standard Schema Interface (`StandardSchemaV1`)
 
-This is the primary configuration object you provide to enable validation.
+CSV Utils leverages the [Standard Schema](https://standardschema.dev) specification. This allows you to use schemas from any compatible library (like Zod 3.24+, Valibot, ArkType) directly. A Standard Schema object exposes its validation logic and type information through a `~standard` property.
 
 ```typescript
-interface CSVSchemaConfig<T> {
-  // Schema applied to each entire row object (e.g., a Zod schema or StandardSchemaV1).
-  // This runs AFTER columnSchemas.
-  rowSchema?: StandardSchemaV1<any, T> | ZodSchema<T>;
+// Abstract representation of the StandardSchemaV1 interface
+// (as defined by @standard-schema/spec)
+interface StandardSchemaV1<Input = unknown, Output = Input> {
+  readonly '~standard': {
+    readonly version: 1;
+    readonly vendor: string; // e.g., 'zod', 'valibot'
+    readonly validate: (value: unknown) =>
+      | StandardSchemaV1.SuccessResult<Output>
+      | StandardSchemaV1.FailureResult
+      | Promise<StandardSchemaV1.SuccessResult<Output> | StandardSchemaV1.FailureResult>;
+    readonly types?: { readonly input: Input; readonly output: Output };
+  };
+}
 
-  // Schemas applied to individual column values *before* rowSchema validation.
-  // Keys are property names of T (after header mapping and custom casting).
+// namespace StandardSchemaV1 {
+//   interface SuccessResult<Output> { readonly value: Output; readonly issues?: undefined; }
+//   interface FailureResult { readonly issues: ReadonlyArray<Issue>; }
+//   interface Issue { message: string; path?: ReadonlyArray<PropertyKey | PathSegment>; }
+// }
+```
+
+### `CSVSchemaConfig<T>` (Options)
+
+This configuration object enables validation and expects schemas conforming to `StandardSchemaV1`.
+
+```typescript
+interface CSVSchemaConfig<T extends Record<string, any>> {
+  /**
+   * Schema applied to each entire row object.
+   * Its `Output` type (from `~standard.types.output`) MUST be `T`.
+   * Runs AFTER `columnSchemas`.
+   */
+  rowSchema?: StandardSchemaV1<any, T>;
+
+  /**
+   * Schemas applied to individual column values *before* `rowSchema` validation.
+   * Keys are property names of `T` (after header mapping and custom casting).
+   * The `Output` type of `columnSchemas[K]` MUST be `T[K]`.
+   */
   columnSchemas?: {
-    [K in keyof Partial<T>]?: StandardSchemaV1<any, T[K]> | ZodSchema<T[K]>
+    [K in keyof Partial<T>]?: StandardSchemaV1<unknown, T[K]>;
   } | {
-    // Or, if column names are not known at compile time or are dynamic
-    [columnName: string]: StandardSchemaV1<any, any> | ZodSchema<any>;
+    [columnName: string]: StandardSchemaV1<unknown, any>; // For dynamic column names
   };
 
-  // How to handle rows that fail validation.
-  validationMode?: 'error' | 'filter' | 'keep'; // Default: 'error'
+  /** How to handle rows that fail validation. Default: 'error' */
+  validationMode?: 'error' | 'filter' | 'keep';
 
-  // Set to true if any of your schema validation logic is asynchronous.
-  // This is automatically handled by async CSV methods (e.g., fromFileAsync).
-  // For sync methods (e.g. fromFile), if a schema is async and useAsync is not true,
-  // an error will be thrown or async validation might be skipped.
+  /**
+   * Must be `true` if any schema's `~standard.validate` function is asynchronous (returns a Promise).
+   * Synchronous CSV methods (e.g., `CSV.fromFile()`) will report an issue via `tryValidateStandardSchemaSync`
+   * if `useAsync` is not `true` for an async schema.
+   * Async CSV methods (e.g., `CSV.fromFileAsync()`) typically infer or default this to `true`.
+   */
   useAsync?: boolean;
 }
 ```
 
 ### Validation Modes
 
-Determines what happens when a row (or column within a row) fails validation:
-
-*   **`'error'` (Default):** The CSV processing operation (e.g., `CSV.fromFile`) immediately throws a `CSVError` upon encountering the first invalid row.
-*   **`'filter'`:** Invalid rows are silently removed from the dataset. Only valid rows are included in the resulting `CSV` instance.
-*   **`'keep'`:** All rows are kept, regardless of their validity. The validation status and any issues for each row are stored in `csvInstance.validationResults`. This mode is useful for inspecting errors or implementing custom error handling.
+*   **`'error'` (Default):** Throws a `CSVError` on the first invalid row.
+*   **`'filter'`:** Silently removes invalid rows.
+*   **`'keep'`:** Keeps all rows; `csvInstance.validationResults` stores validation details for each.
 
 ### Synchronous vs. Asynchronous Validation
 
-*   **Synchronous:** Most basic validation logic (e.g., checking string length, number range) is synchronous.
-*   **Asynchronous:** Some validation might require async operations (e.g., checking if a user ID exists in a database via an API call).
-    *   If your schemas involve `async` logic (like Zod's `.refine(async ...)`), you **must** set `useAsync: true` in your `CSVSchemaConfig` when using synchronous CSV methods like `CSV.fromFile()`.
-    *   Alternatively, use asynchronous CSV methods like `CSV.fromFileAsync()` or `csvInstance.validateAsync()`, which handle `useAsync: true` by default if a schema is provided.
+A `StandardSchemaV1`'s `~standard.validate` function can be synchronous (returning a result directly) or asynchronous (returning a `Promise` of a result).
 
-## Using `StandardSchemaV1`
+*   **Async Schemas with Synchronous CSV Methods:** If you use a schema with an async `validate` function with methods like `CSV.fromFile()`:
+    *   You **must** set `useAsync: true` in `CSVSchemaConfig`.
+    *   If `useAsync` is `false` (or omitted), an issue will be reported by the library's internal synchronous validation helper, indicating that synchronous validation was expected for an asynchronous schema. This treats that specific validation attempt as a failure for the synchronous path.
+*   **Async Schemas with Asynchronous CSV Methods:** Methods like `CSV.fromFileAsync()` or `csvInstance.validateAsync()` are designed for asynchronous operations and will correctly handle (i.e., `await`) async `validate` functions. In these contexts, `useAsync: true` is often the default or inferred behavior when a schema is provided.
 
-The library directly supports a basic schema interface called `StandardSchemaV1`. This is useful for defining simple, self-contained validation rules without external dependencies.
+## Using Standard Schema Compliant Libraries (e.g., Zod)
 
-### Defining a `StandardSchemaV1` Object
-
-A `StandardSchemaV1` object has a specific structure:
-
-```typescript
-import { StandardSchemaV1 } from '@doeixd/csv-utils';
-
-// Example: Schema to ensure a string is a valid, non-empty email.
-const nonEmptyEmailSchema: StandardSchemaV1<string, string> = {
-  '~standard': { // This key is mandatory
-    version: 1,
-    vendor: 'my-app-validations', // Your identifier
-    types: {
-      input: '' as string,  // Type hint for input (value from CSV after casting)
-      output: '' as string, // Type hint for output (value after validation, possibly coerced)
-    },
-    validate: (value: unknown): StandardSchemaV1.Result<string> => {
-      if (typeof value !== 'string') {
-        return { issues: [{ message: 'Must be a string.' }] };
-      }
-      if (value.trim() === '') {
-        return { issues: [{ message: 'Email cannot be empty.' }] };
-      }
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
-        return { issues: [{ message: 'Invalid email format.' }] };
-      }
-      // If valid, return the value (can be transformed/coerced here)
-      return { value: value.toLowerCase() }; // Example: coerce to lowercase
-    },
-  },
-};
-```
-*   `validate` function:
-    *   Receives the value to validate.
-    *   Returns an object:
-        *   If valid: `{ value: validatedAndPossiblyCoercedValue }`
-        *   If invalid: `{ issues: [{ message: string, path?: (string|number)[], code?: string }, ...] }`
-
-### Example: Custom Column Validation
-
-Let's validate that a `productId` column starts with "SKU-" and an `age` column is a positive number.
-
-```typescript
-import CSV, { CSVReadOptions, CSVSchemaConfig, StandardSchemaV1 } from '@doeixd/csv-utils';
-
-interface Product {
-  productId: string;
-  productName: string;
-  quantity: number; // Assume this is already number after customCasts
-}
-
-const skuSchema: StandardSchemaV1<string, string> = {
-  '~standard': { /* ... version, vendor, types ... */
-    types: { input: '', output: '' },
-    validate: (value: unknown) => {
-      if (typeof value !== 'string' || !value.startsWith('SKU-')) {
-        return { issues: [{ message: 'Product ID must start with "SKU-".' }] };
-      }
-      return { value };
-    },
-  }
-};
-
-// Schema for quantity (assuming it's already a number from customCasts)
-const positiveNumberSchema: StandardSchemaV1<number, number> = {
-  '~standard': { /* ... version, vendor, types ... */
-    types: { input: 0, output: 0 },
-    validate: (value: unknown) => {
-      if (typeof value !== 'number' || value <= 0) {
-        return { issues: [{ message: 'Must be a positive number.' }] };
-      }
-      return { value };
-    },
-  }
-};
-
-const productSchemaConfig: CSVSchemaConfig<Product> = {
-  columnSchemas: {
-    productId: skuSchema,
-    quantity: positiveNumberSchema,
-  },
-  validationMode: 'filter', // Filter out rows with invalid productId or quantity
-};
-
-// CSV data:
-// productId,productName,quantity
-// SKU-123,Apple,10
-// INV-456,Banana,5      <-- Invalid productId
-// SKU-789,Orange,-2     <-- Invalid quantity
-
-const csvReadOptions: CSVReadOptions<Product> = {
-  // Assume customCasts handle 'quantity' string to number conversion
-  customCasts: { columnCasts: { quantity: 'number' } },
-  schema: productSchemaConfig,
-};
-
-// const products = CSV.fromFile<Product>('products_with_errors.csv', csvReadOptions);
-// `products` will only contain the 'Apple' row.
-```
-
-## Using Zod for Validation
-
-[Zod](https://zod.dev/) is a popular TypeScript-first schema declaration and validation library. CSV Utils seamlessly integrates with Zod schemas.
-
-### Installation
-
-If you haven't already, install Zod:
-`npm install zod` or `yarn add zod`
+Libraries like Zod (v3.24.0+), Valibot, and ArkType directly implement the `StandardSchemaV1` interface. This means their schema objects can be passed directly to CSV Utils' `CSVSchemaConfig`.
 
 ### Example: Row Validation with Zod
 
-Validate the entire row object after initial parsing, header mapping, and custom casting.
+```typescript
+import CSV, { CSVSchemaConfig } from '@doeixd/csv-utils';
+import { z } from 'zod'; // Ensure Zod v3.24.0+
+
+const UserZodSchema = z.object({
+  id: z.coerce.number().int().positive(), // z.coerce attempts type conversion
+  name: z.string().min(2, "Name must be at least 2 characters"),
+  email: z.string().email("Invalid email format"),
+});
+type User = z.infer<typeof UserZodSchema>;
+
+// UserZodSchema from Zod v3.24.0+ is already a StandardSchemaV1<unknown, User>
+const schemaConfig: CSVSchemaConfig<User> = {
+  rowSchema: UserZodSchema, // Pass the Zod schema directly
+  validationMode: 'filter',
+};
+
+// Example CSV content:
+// id,name,email
+// 1,Alice,alice@example.com  (Valid)
+// " 02 ",B,bob@invalid      (id will be coerced by Zod, but name 'B' fails min(2), and email is invalid)
+
+// const usersCsv = CSV.fromString(
+//   'id,name,email\n1,Alice,alice@example.com\n" 02 ",B,bob@invalid',
+//   { schema: schemaConfig }
+// );
+// usersCsv.count() would be 1 (only Alice's record)
+```
+
+### Example: Column Validation with Zod
 
 ```typescript
 import CSV, { CSVSchemaConfig, CSVReadOptions } from '@doeixd/csv-utils';
 import { z } from 'zod';
 
-const UserSchema = z.object({
-  id: z.string().min(1, "ID cannot be empty"),
-  name: z.string().min(2, "Name must be at least 2 characters"),
-  email: z.string().email("Invalid email format"),
-  age: z.coerce.number().positive("Age must be a positive number").optional(),
-  // .coerce.number() attempts to convert string to number before validation
-});
-type User = z.infer<typeof UserSchema>;
-
-const schemaConfig: CSVSchemaConfig<User> = {
-  rowSchema: UserSchema,
-  validationMode: 'keep', // Keep invalid rows to inspect them
-};
-
-// CSV: id,name,email,age
-//      1,Alice,alice@example.com,30
-//      ,Bo,bob@invalid,twenty   <-- empty id, short name, invalid email, non-numeric age
-//      3,Carol,carol@example,   <-- invalid email, age is fine (optional)
-
-const readOpts: CSVReadOptions<User> = {
-  // No customCasts for 'age' needed here because z.coerce.number() handles it.
-  // If 'age' was 'N/A' or similar, customCasts might still be useful before Zod.
-  schema: schemaConfig,
-};
-
-// const usersCsv = CSV.fromFile<User>('users_for_zod.csv', readOpts);
-// Check usersCsv.validationResults for details on the second row's failures.
-```
-
-### Example: Column Validation with Zod
-
-Validate individual columns *before* the `rowSchema` is applied. This can be useful for early exits or specific column transformations/coercions.
-
-```typescript
-import CSV, { CSVSchemaConfig } from '@doeixd/csv-utils';
-import { z } from 'zod';
-
-interface Item {
-  sku: string;       // Must be uppercase, 5 chars
-  quantity: number;  // Must be integer > 0
-  description: string;
-}
+interface Item { sku: string; quantity: number; }
 
 const itemSchemaConfig: CSVSchemaConfig<Item> = {
   columnSchemas: {
-    sku: z.string().length(5).toUpperCase().regex(/^[A-Z0-9]+$/, "SKU must be alphanumeric"),
-    quantity: z.coerce.number().int().positive(), // Coerce then validate
+    // Zod schemas are directly StandardSchemaV1 compliant
+    sku: z.string().length(5).toUpperCase(), // Zod can transform (toUpperCase) during validation
+    quantity: z.coerce.number().int().positive(),
   },
-  // Optional: A rowSchema could be added here for cross-field validation
-  // rowSchema: z.object({ /* ... */ }).superRefine(...),
   validationMode: 'filter',
 };
 
-// CSV: sku,quantity,description
-//      abcde,10,Valid Item          <-- sku will be uppercased by Zod
-//      SKU01,5.5,Item with float qty <-- quantity fails .int()
-//      TOOLONG,5,Bad SKU            <-- sku fails .length(5)
+// Example CSV content:
+// sku,quantity
+// abcde,10          (sku becomes "ABCDE" via Zod's transform, quantity 10 is valid)
+// SKU01,"5.5"       (quantity coerced by Zod to 5.5, then fails .int() validation)
+// TOOLONG,5         (sku fails .length(5) validation)
 
-// const itemsCsv = CSV.fromFile<Item>('items_column_zod.csv', { schema: itemSchemaConfig });
-// `itemsCsv` will only contain the (transformed) first item.
+// const readOpts: CSVReadOptions<Item> = { schema: itemSchemaConfig };
+// const itemsCsv = CSV.fromString(csvString, readOpts);
+// itemsCsv would contain: { sku: "ABCDE", quantity: 10 }
 ```
 
-### Coercion with Zod
+### Leveraging Coercion in Schema Libraries
+Schema libraries like Zod, with features such as `z.coerce.*` (e.g., `z.coerce.number()`), can attempt to convert input values to the target type *during their validation process*. This is a powerful feature that can reduce the need for extensive pre-processing with CSV Utils' `customCasts`, especially if the schema's built-in coercion capabilities are sufficient for your data formats. The "Order of Operations" section below further clarifies how `customCasts` and schema coercion interact.
 
-Zod's `z.coerce` (e.g., `z.coerce.number()`, `z.coerce.date()`) is very powerful. It attempts to convert the input value to the target type before applying further validations. This can often reduce the need for extensive `customCasts` if Zod's coercion meets your needs.
+## Creating Custom `StandardSchemaV1` Objects (Advanced)
 
-*   **Order:** `customCasts` run *before* schema validation. If a custom cast prepares a value (e.g., string to number), Zod then validates that number. If Zod coerces, it does so on the value it receives (which might have already been through `customCasts`).
+For highly specific validation logic not covered by existing Standard Schema compliant libraries, or if you prefer not to use them, you can manually implement the `StandardSchemaV1` interface.
+
+```typescript
+import { StandardSchemaV1 } from '@standard-schema/spec'; // Or from your library if re-exported
+
+const customPositiveNumberSchema: StandardSchemaV1<unknown, number> = {
+  '~standard': {
+    version: 1,
+    vendor: 'my-custom-validator/positiveNumber',
+    types: { input: undefined as unknown, output: 0 as number },
+    validate: (value: unknown): StandardSchemaV1.Result<number> => {
+      const n = Number(value); // Input is unknown, attempt conversion
+      // Ensure boolean 'true' (which is Number(true) === 1) is not treated as a valid positive number here if not desired
+      if (typeof value === 'boolean' || isNaN(n) || n <= 0) {
+        return { issues: [{ message: 'Must be a positive number' }] };
+      }
+      return { value: n }; // Return the coerced number
+    },
+  },
+};
+```
 
 ## Applying Schemas
 
-You can apply schema validation in two main ways:
-
 ### During CSV Reading
-
-Pass the `CSVSchemaConfig` object in the `schema` property of `CSVReadOptions` when calling methods like `CSV.fromFile`, `CSV.fromString`, `CSV.fromFileAsync`, or `CSV.fromStream`.
+Provide the `CSVSchemaConfig` object in the `schema` property of `CSVReadOptions` when calling methods like `CSV.fromFile()`, `CSV.fromString()`, `CSV.fromFileAsync()`, or `CSV.fromStream()`.
 
 ```typescript
 const readOptions: CSVReadOptions<MyType> = {
-  // ... other options like headerMap, customCasts ...
-  schema: mySchemaConfig,
+  customCasts: { columnCasts: { /* e.g., someField: 'number' */ } }, // customCasts run before schema
+  schema: mySchemaConfig, // mySchemaConfig contains StandardSchemaV1 compliant schemas
+  // ... other options ...
 };
-const csvData = CSV.fromFile<MyType>('data.csv', readOptions);
+// const csvData = CSV.fromFile<MyType>('data.csv', readOptions);
 ```
 
 ### Using `csvInstance.validate()` or `csvInstance.validateAsync()`
-
-Apply validation to an existing `CSV` instance. This returns a *new* `CSV` instance.
+Apply validation to an existing `CSV` instance. These methods return a *new* `CSV` instance with the validation results.
 
 ```typescript
-const initialCsv = CSV.fromData<MyType>(someData);
+const initialCsv = CSV.fromData<MyType>(someDataArray); // Data is already in object form
 
-// Synchronous validation (throws if schema is async and useAsync:false not set)
-try {
-  const validatedCsv = initialCsv.validate(mySchemaConfig);
-  // Work with validatedCsv
-} catch (e) {
-  console.error("Validation failed:", e);
-}
+// Synchronous validation:
+// Ensure schemas in mySyncSchemaConfig are synchronous,
+// or if they are async, ensure useAsync:false is set to get the "async expected" issue.
+const validatedCsv = initialCsv.validate(mySyncSchemaConfig);
 
-// Asynchronous validation
-async function processData() {
-  try {
-    const asyncValidatedCsv = await initialCsv.validateAsync({
-      ...mySchemaConfig,
-      useAsync: true, // Ensure async is enabled if schema needs it
-    });
-    // Work with asyncValidatedCsv
-  } catch (e) {
-    console.error("Async validation failed:", e);
-  }
-}
+// Asynchronous validation:
+// const asyncValidatedCsv = await initialCsv.validateAsync({ ...mySchemaConfig, useAsync: true });
 ```
+**Note:** When using `csvInstance.validate()` or `validateAsync()` directly on a `CSV` instance, the library's `customCasts` (defined in `CSVReadOptions`) are **not** re-applied as part of these validation methods. The data within the `CSV` instance is validated as-is. If type preparation is needed for the data already in the `CSV` instance before schema validation, that preparation must have occurred before, or your schemas themselves must handle coercion from the existing types.
 
 ## Working with Validation Results (`validationMode: 'keep'`)
-
-When `validationMode: 'keep'` is used, the `CSV` instance will have a `validationResults` property. This is an array of `RowValidationResult<T>` objects, one for each original row.
+When `validationMode: 'keep'`, `csvInstance.validationResults` (an array of `RowValidationResult<T>`) provides detailed outcomes for each original row.
 
 ### `RowValidationResult<T>` Interface
-
 ```typescript
 interface RowValidationResult<T> {
-  originalRow: Record<string, any>; // The row data BEFORE validation/coercion by schema
-  validatedRow?: T;                 // The row data AFTER successful validation and schema coercion.
-                                    // Undefined if the row was invalid.
-  valid: boolean;                   // Overall validity of the row.
-  rowIssues?: StandardSchemaV1.Issue[];       // Issues from `rowSchema` validation.
-  columnIssues?: Record<string, StandardSchemaV1.Issue[]>; // Issues from `columnSchemas`, keyed by column name.
+  /** Row data AFTER customCasts but BEFORE schema validation/coercion by schemas. */
+  originalRow: Record<string, any>;
+  /**
+   * Row data AFTER successful validation & schema coercion by schemas.
+   * If validation failed, this may be partially transformed, contain original values for failed parts, or be undefined.
+   */
+  validatedRow?: T;
+  /** Overall validity of the row. */
+  valid: boolean;
+  /** Issues from the schema in `rowSchema`. */
+  rowIssues?: StandardSchemaV1.Issue[];
+  /** Issues from schemas in `columnSchemas`, keyed by column name. */
+  columnIssues?: Record<string, StandardSchemaV1.Issue[]>;
 }
 
-interface StandardSchemaV1.Issue {
-  message: string;
-  path?: (string | number)[]; // Path to the invalid property (e.g., ['address', 'zipCode'])
-  code?: string;              // Specific error code (Zod provides these)
-}
+// StandardSchemaV1.Issue (from @standard-schema/spec or your library's re-export) typically includes:
+// interface Issue {
+//   message: string;
+//   path?: ReadonlyArray<PropertyKey | StandardSchemaV1.PathSegment>;
+//   // Specific libraries (like Zod when adapted) might add other properties like 'code'.
+// }
 ```
 
 ### Example: Inspecting Issues
-
+When `validationMode: 'keep'`, iterate through `usersResult.validationResults`:
 ```typescript
-import CSV, { CSVSchemaConfig } from '@doeixd/csv-utils';
-import { z } from 'zod';
-// ... (User and UserSchema defined as in Zod example above) ...
-
-const schemaConfigKeep: CSVSchemaConfig<User> = {
-  rowSchema: UserSchema,
-  validationMode: 'keep', // Important!
-};
-
-// Assuming 'users_for_zod.csv' with invalid data
-const usersResult = CSV.fromFile<User>('users_for_zod.csv', { schema: schemaConfigKeep });
-
-if (usersResult.validationResults) {
-  console.log(`Processed ${usersResult.count()} rows. Validation results available.`);
-  usersResult.validationResults.forEach((res, index) => {
-    if (!res.valid) {
-      console.log(`\nRow ${index + 1} (Original: ${JSON.stringify(res.originalRow)}) is INVALID:`);
-      if (res.rowIssues) {
-        console.log('  Row-level issues:');
-        res.rowIssues.forEach(issue => console.log(`    - ${issue.path?.join('.') || 'row'}: ${issue.message} (Code: ${issue.code || 'N/A'})`));
-      }
-      if (res.columnIssues) {
-        console.log('  Column-level issues:');
-        Object.entries(res.columnIssues).forEach(([col, issues]) => {
-          issues.forEach(issue => console.log(`    - Column '${col}': ${issue.message} (Code: ${issue.code || 'N/A'})`));
-        });
-      }
-    } else {
-      // console.log(`\nRow ${index + 1} is VALID. Validated: ${JSON.stringify(res.validatedRow)}`);
-    }
-  });
-}
+// ... (assuming usersResult from a CSV.fromFile call with validationMode: 'keep')
+// usersResult.validationResults?.forEach((res, index) => {
+//   if (!res.valid) {
+//     console.log(`Row ${index + 1} (Original: ${JSON.stringify(res.originalRow)}) is INVALID:`);
+//     if (res.columnIssues) {
+//       Object.entries(res.columnIssues).forEach(([col, issues]) => {
+//         issues.forEach(issue => console.log(`  - Column '${col}' on path '${issue.path?.join('.')}': ${issue.message}`));
+//       });
+//     }
+//     if (res.rowIssues) {
+//       res.rowIssues.forEach(issue => console.log(`  - Row Issue on path '${issue.path?.join('.')}': ${issue.message}`));
+//     }
+//   }
+// });
 ```
 
-## Common Scenarios and Best Practices
+## Order of Operations: `customCasts` vs. Schema Validation
 
-### Order of Operations: Casting vs. Validation
+Understanding this sequence is crucial for preparing your data correctly for validation:
 
-1.  **Core CSV Parsing (`csv-parse`):** Initial parsing, potential built-in casting by `csv-parse`.
-2.  **Header Mapping:** Column names/structure transformed.
-3.  **Custom Type Casting (`customCasts`):** Your specific string-to-type logic is applied.
-4.  **Schema Validation (`schema`):** Zod or `StandardSchemaV1` rules are checked against the data that has already been through custom casting.
-    *   **Implication:** If your schema expects a `number` (e.g., `z.number().positive()`), ensure that the value is already a number (or can be coerced by Zod using `z.coerce.number()`) by the time schema validation runs. Use `customCasts` if `csv-parse` or Zod's coercion isn't sufficient for your input string formats.
+1.  **Core CSV Parsing (`csv-parse`):**
+    *   The raw CSV string is parsed into records and fields.
+    *   `csv-parse` itself might perform basic, built-in type casting if its `cast` options (e.g., `csvOptions.cast: true`) are enabled. For example, it might convert a string `"123"` to the number `123`.
 
-### Validating Numeric Ranges or String Patterns
+2.  **Header Mapping (`options.headerMap`):**
+    *   Column names are transformed, and the structure of parsed objects is adjusted according to your mapping rules.
 
-*   **Zod:** Use `.min()`, `.max()`, `.gte()`, `.lte()` for numbers; `.regex()`, `.startsWith()`, `.endsWith()` for strings.
-*   **`StandardSchemaV1`:** Implement the logic within your `validate` function.
+3.  **Custom Type Casting (`options.customCasts`):**
+    *   This CSV Utils feature applies *after* `csv-parse` and `headerMap`.
+    *   **Input to Casters:** Custom casters receive values that may have already been cast by `csv-parse`. If `csv-parse` didn't cast a value (e.g., `csvOptions.cast: false` or the value wasn't a simple number/boolean), the caster will likely receive a string.
+    *   **Purpose:** `customCasts` are designed to handle specific string formats common in CSV files (e.g., "TRUE" to boolean `true`, "N/A" to `null`, "€5.50" to number `5.50`) and convert them into the fundamental JavaScript types your application logic and subsequent schemas expect.
+    *   The data output from this step has had specific fields type-converted by your custom logic.
 
-```typescript
-// Zod example for a rating between 1 and 5
-const ratingSchema = z.coerce.number().int().min(1, "Rating too low").max(5, "Rating too high");
+4.  **Schema Validation (`options.schema`):**
+    *   This is the final data transformation and validation stage, operating on data processed by the preceding steps.
+    *   **`columnSchemas` run first:** Each configured column schema receives the value for its respective column. This value is the result from step 3 (Custom Type Casting). The column schema validates this value and can perform its own further coercions or transformations.
+    *   **`rowSchema` runs next:** It receives the entire row object. The properties of this object are the values that have potentially been transformed by `columnSchemas`. The `rowSchema` validates the overall object structure and any inter-field relationships.
+    *   **Schema Coercion:** Standard Schema compliant libraries like Zod may perform their *own* type coercions as part of their `~standard.validate` step (e.g., Zod's `z.coerce.number()` can convert a string `"123"` to the number `123`).
 
-// StandardSchemaV1 example
-const ratingStandardSchema: StandardSchemaV1<number, number> = {
-  '~standard': { /* ... */
-    types: { input: 0, output: 0 },
-    validate: (v: unknown) => {
-      const n = Number(v); // Assuming v might still be string/unknown here
-      if (isNaN(n) || !Number.isInteger(n) || n < 1 || n > 5) {
-        return { issues: [{ message: "Rating must be an integer between 1 and 5." }] };
-      }
-      return { value: n };
-    }
-  }
-};
-```
+**Interaction Example:**
 
-### Handling Optional Fields
+Consider a CSV with an `amount` column containing `"€1,234.50"`.
 
-*   **Zod:** Use `.optional()` or `.nullable()` on a schema definition.
-    *   `z.string().optional()`: The field can be `undefined` or a string.
-    *   `z.string().nullable()`: The field can be `null` or a string.
-    *   `z.string().optional().nullable()`: Can be string, `null`, or `undefined`.
-*   **`StandardSchemaV1`:** Your `validate` function should explicitly allow `null` or `undefined` if the field is optional and not return an issue for those cases.
+1.  **`csv-parse` (assume `cast:false`):** Output is the string `"€1,234.50"`.
+2.  **`headerMap`:** (Assume 'AmountFromCSV' maps to 'transactionAmount'). The value is still `"€1,234.50"`.
+3.  **`customCasts` for `transactionAmount`:**
+    *   A custom caster tests for "€" and ",".
+    *   It parses by removing "€", replacing "," with "", and converts to the `number` `1234.50`.
+4.  **Schema Validation (`columnSchemas.transactionAmount` using Zod: `z.number().positive().max(10000)`):**
+    *   The Zod schema receives the `number` `1234.50` from `customCasts`.
+    *   It validates that this is a positive number and within the defined maximum.
 
-### Combining Column and Row Validations
+If `customCasts` were not used for `transactionAmount`, and the Zod schema was `z.coerce.number().positive()...`, Zod would attempt to coerce `"€1,234.50"` directly. This might fail (resulting in `NaN`) if Zod's default coercion doesn't handle currency symbols or thousand separators, leading to a validation failure unless the schema is specifically designed to parse such complex strings.
 
-*   **`columnSchemas`** are good for:
-    *   Type checking and coercion for individual fields early.
-    *   Format validation specific to a single column (e.g., SKU format).
-*   **`rowSchema`** is good for:
-    *   Validating the overall structure of the row object.
-    *   Cross-field validation (e.g., `endDate` must be after `startDate`).
-    *   Applying complex business rules to the entire record.
+**Key Principle:** Use `customCasts` to transform raw CSV string representations into clean, fundamental JavaScript types (string, number, boolean, Date, null). Then, use schema validation for structural validation, business rule enforcement, and more fine-grained type checking or coercion on these already-prepared types. Schema libraries (like Zod) can also perform significant coercion, potentially reducing the need for some `customCasts` if their coercion capabilities match your input formats.
 
-Data flows through `columnSchemas` first, then the (potentially transformed by column schemas) row is passed to `rowSchema`.
+## Common Validation Scenarios & Best Practices
 
-### Performance Considerations
-
-*   Validation, especially complex regex or asynchronous checks, adds overhead.
-*   For very large files and performance-critical applications:
-    *   Validate only necessary fields.
-    *   Prefer simpler, synchronous validation rules if possible.
-    *   If using `validationMode: 'keep'`, processing `validationResults` for millions of rows can be memory-intensive. Consider streaming approaches (`CSVStreamProcessor`) if error reporting on huge datasets is needed without loading all results.
-    *   `CSVStreamProcessor` also supports a `.validate()` step for stream-based validation.
+*   **Data Preparation is Key:** Ensure data is in the expected basic JavaScript type *before* it reaches a strict schema validator. Use `customCasts` for CSV-specific string cleaning and initial type conversion. Leverage schema library coercion (like Zod's `z.coerce.*`) for more standard conversions if the input to the schema is suitable for it.
+*   **Specificity:** Use `columnSchemas` for early, atomic validation and coercion of individual fields. Use `rowSchema` for validating the overall record structure and cross-field dependencies.
+*   **Optional Fields:** Define optionality within your schema definitions using features from your chosen schema library (e.g., Zod's `.optional()`, `.nullable()`).
+*   **Performance:** Complex validation rules (especially regex on large strings or asynchronous checks) add processing time. For performance-critical applications with very large datasets, validate selectively and prefer synchronous rules where possible. Stream-based validation with `CSVStreamProcessor.validate()` is available for memory efficiency.
 
 ## Troubleshooting Validation
 
-*   **"Expected number, received string":** This common Zod error means a field Zod expected to be a number was still a string.
-    *   **Solution:** Ensure `customCasts` converts the string to a number *before* Zod validation, OR use `z.coerce.number()` in your Zod schema. Check the order of operations.
-*   **Unexpected `validationMode: 'filter'` behavior:** If rows are disappearing when you don't expect, use `validationMode: 'keep'` temporarily and inspect `validationResults` to see *why* they are being filtered.
-*   **Async validation not working with sync methods:** If you have async logic in your schemas (e.g., Zod's `async .refine()`), you *must* use `validateAsync()` or an async CSV creation method (like `fromFileAsync()`) and ensure `CSVSchemaConfig.useAsync: true` is set (or automatically inferred by async methods).
-*   **Issues from `columnSchemas` vs. `rowSchema`:** If `validationMode: 'keep'`, check both `res.columnIssues` and `res.rowIssues` to pinpoint the source of the validation failure.
-
-By using these validation features thoughtfully, you can significantly improve the reliability and robustness of your CSV data processing workflows.
+*   **"Expected `typeA`, received `typeB`" (Common error from schema libraries like Zod):**
+    *   **Cause:** The data reaching the schema validator was not the JavaScript type it expected.
+    *   **Solution:**
+        1.  Carefully review the "Order of Operations" section.
+        2.  Check if your `customCasts` are correctly converting CSV string values into the basic JavaScript types that your schema anticipates. For example, if your schema expects a `number`, a custom cast should convert strings like `"123.45"` or `"-$50"` into actual numbers.
+        3.  Consider if your schema library's own coercion features (e.g., Zod's `z.coerce.number()`) can appropriately handle the type of data it's receiving *after* `customCasts` have run. If `customCasts` produced a clean string like `"100"`, `z.coerce.number()` can turn it into `100`. But if `customCasts` resulted in `NaN` from an unparseable string, `z.coerce.number()` will also likely yield `NaN`, which might then fail further schema rules (like `.positive()`).
+*   **Rows Filtered Unexpectedly (`validationMode: 'filter'`):**
+    *   **Solution:** Temporarily switch to `validationMode: 'keep'` and inspect the `csvInstance.validationResults` property. This will show you which schema (column or row) and which specific rule caused each row to fail validation.
+*   **Asynchronous Schema Issues with Synchronous CSV Methods:**
+    *   **Cause:** A schema with an `async validate` function is used with a synchronous method (e.g., `CSV.fromFile()`) and `useAsync: true` was not set in the `CSVSchemaConfig`.
+    *   **Solution:** Ensure `useAsync: true` is set in your `CSVSchemaConfig` when using async schemas with synchronous CSV methods. Alternatively, and often preferably, use asynchronous CSV methods like `CSV.fromFileAsync()` or `csvInstance.validateAsync()`, which are designed to handle async schemas correctly.
+*   **Pinpointing Validation Failures:** When using `validationMode: 'keep'`, always check `res.valid`. If `false`, examine both `res.columnIssues` (for failures in individual `columnSchemas`) and `res.rowIssues` (for failures in the `rowSchema`). The `path` property within `StandardSchemaV1.Issue` objects helps locate the specific data field that caused the error.
