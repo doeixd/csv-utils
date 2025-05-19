@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [2.3.0](https://github.com/doeixd/csv-utils/compare/v2.2.0...v2.3.0) (2025-05-19)
+
+
+### Features
+
+* :sparkles: Updated clone(), and made fromData support validation ([e56c063](https://github.com/doeixd/csv-utils/commit/e56c063a278fe16823999d165d0977196de9cd4a))
+
 ## [2.2.0](https://github.com/doeixd/csv-utils/compare/v2.1.1...v2.2.0) (2025-05-19)
 
 
