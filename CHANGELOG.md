@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [2.3.2](https://github.com/doeixd/csv-utils/compare/v2.3.1...v2.3.2) (2025-10-10)
+
+
+### Bug Fixes
+
+* ensure columnIssues is initialized before assignment in CSV validation ([e327998](https://github.com/doeixd/csv-utils/commit/e327998e550172b38a01558ef1e081dba5c2804e))
+
 ### [2.3.1](https://github.com/doeixd/csv-utils/compare/v2.3.0...v2.3.1) (2025-10-10)
 
 ## [2.3.0](https://github.com/doeixd/csv-utils/compare/v2.2.0...v2.3.0) (2025-05-19)
