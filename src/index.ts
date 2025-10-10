@@ -402,14 +402,9 @@ export class CSV<T extends Record<string, any>> {
             result.valid = false;
             result.columnIssues[column] = [...columnValidation.issues];
 
-            // If row validation succeeded but column validation failed, update the column value in validated row
-            if (result.validatedRow && !result.rowIssues) {
-              if ('value' in columnValidation) {
-                (result.validatedRow as any)[column] = columnValidation.value;
-              } else {
-                // Column validation failed, set to null/undefined or keep original
-                (result.validatedRow as any)[column] = null;
-              }
+            // If column validation failed but provided a corrected value, use it
+            if (result.validatedRow && 'value' in columnValidation) {
+              (result.validatedRow as any)[column] = columnValidation.value;
             }
           } else if (result.validatedRow) {
             // Update the validated value in the result
@@ -418,7 +413,7 @@ export class CSV<T extends Record<string, any>> {
         }
 
         // If no column issues, remove the empty object
-        if (Object.keys(result.columnIssues).length === 0) {
+        if (result.columnIssues && Object.keys(result.columnIssues).length === 0) {
           delete result.columnIssues;
         }
       }
@@ -646,11 +641,10 @@ export class CSV<T extends Record<string, any>> {
             throw new CSVError(`Expected object rows for validation, but first parsed record (approx. file line ${firstDataRowActualLine}) is not an object.`);
           }
           const sampleKeys = Object.keys(parsedData[0]);
-          parsedData.forEach((row, i) => {
-            if (!(row && typeof row === 'object')) { throw new CSVError(`Row at approx. file line ${firstDataRowActualLine + i} (parsed index ${i}) is not an object as expected.`); }
-            const relaxCount = finalMainParserOptions.relax_column_count ?? finalMainParserOptions.relaxColumnCount;
-            if (Object.keys(row).length !== sampleKeys.length && !relaxCount) { throw new CSVError(`Row at approx. file line ${firstDataRowActualLine + i} (parsed index ${i}) has inconsistent column count. Expected ${sampleKeys.length}, got ${Object.keys(row).length}.`); }
-          });
+           parsedData.forEach((row, i) => {
+             if (!(row && typeof row === 'object')) { throw new CSVError(`Row at approx. file line ${firstDataRowActualLine + i} (parsed index ${i}) is not an object as expected.`); }
+             if (Object.keys(row).length !== sampleKeys.length) { throw new CSVError(`Row at approx. file line ${firstDataRowActualLine + i} (parsed index ${i}) has inconsistent column count. Expected ${sampleKeys.length}, got ${Object.keys(row).length}.`); }
+           });
         }
       }
 
@@ -796,7 +790,7 @@ export class CSV<T extends Record<string, any>> {
       // Default built-in casters
       const defaultDefinitions: CustomCastDefinition = {
         string: { test: () => true, parse: (v) => String(v) },
-        number: { test: (v) => !isNaN(Number(v)), parse: (v) => Number(v) },
+        number: { test: () => true, parse: (v) => Number(v) },
         boolean: { test: (v) => ['true', 'false', '1', '0', 'yes', 'no'].includes(v.toLowerCase()), parse: (v) => ['true', '1', 'yes'].includes(v.toLowerCase()) },
         date: { test: (v) => !isNaN(Date.parse(v)), parse: (v) => new Date(v) },
         object: { test: (v) => { try { JSON.parse(v); return true; } catch { return false; } }, parse: (v) => JSON.parse(v) },
@@ -1500,42 +1494,26 @@ export class CSV<T extends Record<string, any>> {
 
         // Validate columns in parallel
         const columnEntries = Object.entries(columnSchemas);
-        const columnValidationPromises = columnEntries.map(async ([column, schema]) => {
-          if (!schema) return null;
+        await Promise.all(columnEntries.map(async ([column, schema]) => {
+          if (!schema) return;
 
           const columnValidation = await tryValidateStandardSchemaAsync(schema, row[column]);
-          return { column, columnValidation };
-        });
-
-        const columnResults = await Promise.all(columnValidationPromises);
-
-        // Process column validation results
-        for (const columnResult of columnResults) {
-          if (!columnResult) continue;
-
-          const { column, columnValidation } = columnResult;
-
           if (columnValidation.issues) {
             result.valid = false;
             result.columnIssues[column] = [...columnValidation.issues];
 
-            // If row validation succeeded but column validation failed, update the column value in validated row
-            if (result.validatedRow && !result.rowIssues) {
-              if ('value' in columnValidation) {
-                (result.validatedRow as any)[column] = columnValidation.value;
-              } else {
-                // Column validation failed, set to null/undefined or keep original
-                (result.validatedRow as any)[column] = null;
-              }
+            // If column validation failed but provided a corrected value, use it
+            if (result.validatedRow && 'value' in columnValidation) {
+              (result.validatedRow as any)[column] = columnValidation.value;
             }
           } else if (result.validatedRow) {
             // Update the validated value in the result
             (result.validatedRow as any)[column] = columnValidation.value;
           }
-        }
+        }));
 
         // If no column issues, remove the empty object
-        if (Object.keys(result.columnIssues).length === 0) {
+        if (result.columnIssues && Object.keys(result.columnIssues).length === 0) {
           delete result.columnIssues;
         }
       }

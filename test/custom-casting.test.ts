@@ -1,7 +1,48 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import CSV, { CSVError } from '../src';
+
+// Mock fs for unit tests
+vi.mock('fs', () => ({
+  default: {
+    readFileSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    createReadStream: vi.fn(),
+    createWriteStream: vi.fn(),
+    existsSync: vi.fn(),
+    mkdtempSync: vi.fn(),
+    unlinkSync: vi.fn(),
+    statSync: vi.fn(),
+    promises: {
+      readFile: vi.fn(),
+      writeFile: vi.fn(),
+    }
+  },
+  readFileSync: vi.fn(),
+  writeFileSync: vi.fn(),
+  createReadStream: vi.fn(),
+  createWriteStream: vi.fn(),
+  existsSync: vi.fn(),
+  mkdtempSync: vi.fn(),
+  unlinkSync: vi.fn(),
+  statSync: vi.fn(),
+  promises: {
+    readFile: vi.fn(),
+    writeFile: vi.fn(),
+  }
+}));
+
+// Mock path for unit tests
+vi.mock('path', () => ({
+  default: {
+    resolve: vi.fn((p) => p),
+    join: vi.fn((dir, file) => `${dir}/${file}`),
+  },
+  resolve: vi.fn((p) => p),
+  join: vi.fn((dir, file) => `${dir}/${file}`),
+}));
 
 
 

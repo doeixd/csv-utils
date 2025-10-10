@@ -1,34 +1,7 @@
 import { vi } from 'vitest';
 
 // Define any global mock configuration here
-vi.mock('fs', () => ({
-  default: {
-    readFileSync: vi.fn(),
-    writeFileSync: vi.fn(),
-    createReadStream: vi.fn(),
-    createWriteStream: vi.fn(),
-    existsSync: vi.fn(),
-    mkdtempSync: vi.fn(),
-    unlinkSync: vi.fn(),
-    statSync: vi.fn(),
-    promises: {
-      readFile: vi.fn(),
-      writeFile: vi.fn(),
-    }
-  },
-  readFileSync: vi.fn(),
-  writeFileSync: vi.fn(),
-  createReadStream: vi.fn(),
-  createWriteStream: vi.fn(),
-  existsSync: vi.fn(),
-  mkdtempSync: vi.fn(),
-  unlinkSync: vi.fn(),
-  statSync: vi.fn(),
-  promises: {
-    readFile: vi.fn(),
-    writeFile: vi.fn(),
-  }
-}));
+// Note: fs is not mocked globally anymore - individual tests mock it as needed
 
 vi.mock('path', () => ({
   default: {
