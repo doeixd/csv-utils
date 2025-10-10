@@ -1502,7 +1502,7 @@ export class CSV<T extends Record<string, any>> {
           if (columnValidation.issues) {
             result.valid = false;
             if (!result.columnIssues) result.columnIssues = {};
-            result.columnIssues[column] = [...columnValidation.issues];
+            result.columnIssues![column] = [...columnValidation.issues];
 
             // If column validation failed but provided a corrected value, use it
             if (result.validatedRow && 'value' in columnValidation) {

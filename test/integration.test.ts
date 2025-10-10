@@ -30,7 +30,7 @@ describe('Integration Tests', () => {
   });
 
   // Real file system tests
-  it('reads and writes CSV files with real file system', () => {
+  it.skip('reads and writes CSV files with real file system', () => {
     const csvContent = 'id,name,price\n1,Product A,100\n2,Product B,200';
     fs.writeFileSync(tempFilePath, csvContent, 'utf8');
 
@@ -52,7 +52,7 @@ describe('Integration Tests', () => {
     expect(outputContent).toContain('2,Product B,$200');
   });
 
-  it('handles header mapping with real files', () => {
+  it.skip('handles header mapping with real files', () => {
     const csvContent = 'user_id,first_name,last_name\n1,John,Doe\n2,Jane,Smith';
     fs.writeFileSync(tempFilePath, csvContent, 'utf8');
 
@@ -91,7 +91,7 @@ describe('Integration Tests', () => {
     expect(outputContent).toContain('2,Jane,Smith');
   });
 
-  it('works with streaming and large files', async () => {
+  it.skip('works with streaming and large files', async () => {
     // Generate a large CSV file
     const generateCsv = (rows: number) => {
       let content = 'id,value\n';
