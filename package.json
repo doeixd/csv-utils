@@ -47,7 +47,7 @@
     "watch": "pridepack watch",
     "start": "pridepack start",
     "dev": "pridepack dev",
-    "test": "vitest"
+    "test": "vitest --run"
   },
   "private": false,
   "description": "Utilities for csv files / arrays of objects",

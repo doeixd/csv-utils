@@ -216,7 +216,7 @@ describe('CSV Data Validation (with StandardSchemaV1)', () => {
     });
 
     it('should keep invalid rows with rowSchema and mode "keep", providing rowIssues', () => {
-      const csvString = `id,name,email\n1,Valid User,valid@example.com\n2,Inv,invalid-email`;
+      const csvString = `id,name,email\n1,Valid User,valid@example.com\n2,I,invalid-email`;
       const schemaConfig: CSVSchemaConfig<User> = {
         rowSchema: UserRowStandardSchema,
         validationMode: 'keep',
@@ -226,7 +226,7 @@ describe('CSV Data Validation (with StandardSchemaV1)', () => {
       const results = csv.validationResults!;
       const invalidResult = results.find(r => !r.valid)!;
 
-      expect(invalidResult.originalRow.name).toBe('Inv');
+      expect(invalidResult.originalRow.name).toBe('I');
       expect(invalidResult.rowIssues).toBeDefined();
       expect(invalidResult.rowIssues!.some(i => i.path?.includes('name') && i.message === 'Name too short')).toBe(true);
       expect(invalidResult.rowIssues!.some(i => i.path?.includes('email') && i.message === 'Invalid email')).toBe(true);
@@ -313,8 +313,8 @@ describe('CSV Data Validation (with StandardSchemaV1)', () => {
 
     it('should filter with async COLUMN schema in fromFileAsync', async () => {
       const { Readable } = await import('node:stream');
-      vi.mock('node:fs', async (importOriginal) => {
-        const originalFs = await importOriginal() as typeof import('node:fs');
+      vi.mock('node:fs', () => {
+        const originalFs = vi.importActual('node:fs') as typeof import('node:fs');
         return { ...originalFs, createReadStream: vi.fn().mockImplementation(() => Readable.from([csvStringForNameCol])) };
       });
       const schemaConfig: CSVSchemaConfig<NameType> = {

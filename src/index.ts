@@ -9,13 +9,13 @@ import path from 'node:path';
 import { parse as parseCSV, stringify as stringifyCSV } from 'csv/sync';
 import { parse as parseCSVAsync, stringify as stringifyCSVAsync } from 'csv';
 import { distance as levenshteinDistance } from 'fastest-levenshtein';
-import { get as lodashGet } from 'lodash';
-import { createHeaderMapFns, HeaderMap, RetryOptions } from './headers'
-import { StandardSchemaV1, tryValidateStandardSchemaSync, tryValidateStandardSchemaAsync, CSVSchemaConfig, RowValidationResult } from './schema'
+import lodashGet from 'lodash/get';
+import { createHeaderMapFns, HeaderMap, RetryOptions, ObjectArrayToCsvConfig } from './headers'
+import { tryValidateStandardSchemaSync, tryValidateStandardSchemaAsync, CSVSchemaConfig, RowValidationResult } from './schema'
 import { Readable, Transform, Writable, pipeline as streamPipeline } from 'node:stream';
 import { type Transform as NodeTransform } from 'node:stream'
 import { promisify } from 'node:util';
-import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
+import { Worker } from 'node:worker_threads';
 import os from 'node:os';
 
 export * from './headers'
@@ -291,47 +291,7 @@ export class CSV<T extends Record<string, any>> {
     this.validationResults = validationResults;
   }
 
-  /**
-   * Helper function to implement retry logic
-   * @param operation - Function to retry
-   * @param errorMessage - Error message if all retries fail
-   * @param retryOptions - Retry configuration
-   * @returns Result of the operation
-   * @throws {CSVError} If operation fails after all retries
-   */
-  private static async retryOperation<R>(
-    operation: () => Promise<R>,
-    errorMessage: string,
-    retryOptions?: RetryOptions
-  ): Promise<R> {
-    const maxRetries = retryOptions?.maxRetries ?? 3;
-    const baseDelay = retryOptions?.baseDelay ?? 100;
-    const logRetries = retryOptions?.logRetries ?? false;
 
-    let lastError: Error | null = null;
-
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        return await operation();
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
-
-        if (attempt < maxRetries) {
-          // Calculate delay with exponential backoff
-          const delay = Math.pow(2, attempt) * baseDelay;
-
-          if (logRetries) {
-            console.warn(`Retry attempt ${attempt + 1}/${maxRetries} after ${delay}ms`);
-          }
-
-          // Wait before retrying
-          await new Promise(resolve => setTimeout(resolve, delay));
-        }
-      }
-    }
-
-    throw new CSVError(`${errorMessage} after ${maxRetries} attempts`, lastError);
-  }
 
   /**
    * Synchronous version of retry operation
@@ -395,7 +355,7 @@ export class CSV<T extends Record<string, any>> {
   private static _validateWithSchemaSync<T extends Record<string, any>>(
     data: Record<string, any>[],
     schemaConfig: CSVSchemaConfig<T>,
-    baseLineNumber: number = 1
+    _baseLineNumber: number = 1
   ): [T[], RowValidationResult<T>[]] {
     const { rowSchema, columnSchemas, validationMode = 'error', useAsync = false } = schemaConfig;
 
@@ -410,9 +370,9 @@ export class CSV<T extends Record<string, any>> {
     const validatedData: T[] = [];
 
     // Function to validate a row synchronously
-    const validateRowSync = (row: Record<string, any>, index: number): RowValidationResult<T> => {
+    const validateRowSync = (row: Record<string, any>, _index: number): RowValidationResult<T> => {
       const result: RowValidationResult<T> = {
-        originalRow: row,
+        originalRow: { ...row },
         valid: true
       };
 
@@ -642,6 +602,11 @@ export class CSV<T extends Record<string, any>> {
         ...(options.csvOptions || {})
       };
 
+      // Set relax_column_count if validateData is enabled to allow validation to catch inconsistencies
+      if (options.validateData) {
+        finalMainParserOptions.relax_column_count = true;
+      }
+
       const fromLineForData = getCsvFromLineValue(options.csvOptions);
       if (fromLineForData !== undefined) { finalMainParserOptions.from_line = fromLineForData; }
       delete finalMainParserOptions.from; delete finalMainParserOptions.fromLine;
@@ -729,6 +694,9 @@ export class CSV<T extends Record<string, any>> {
       try {
         return operation();
       } catch (error) {
+        if (error instanceof CSVError) {
+          throw error;
+        }
         throw new CSVError(
           `Failed to read or parse CSV file: ${filename}`,
           error instanceof Error ? error : new Error(String(error))
@@ -823,11 +791,24 @@ export class CSV<T extends Record<string, any>> {
 
     // Apply custom casting if specified
     if (options.customCasts && processedData.length > 0) {
-      const { definitions, columnCasts, onCastError = 'error' } = options.customCasts;
+      const { definitions: userDefinitions, columnCasts, onCastError = 'error' } = options.customCasts;
+
+      // Default built-in casters
+      const defaultDefinitions: CustomCastDefinition = {
+        string: { test: () => true, parse: (v) => String(v) },
+        number: { test: (v) => !isNaN(Number(v)), parse: (v) => Number(v) },
+        boolean: { test: (v) => ['true', 'false', '1', '0', 'yes', 'no'].includes(v.toLowerCase()), parse: (v) => ['true', '1', 'yes'].includes(v.toLowerCase()) },
+        date: { test: (v) => !isNaN(Date.parse(v)), parse: (v) => new Date(v) },
+        object: { test: (v) => { try { JSON.parse(v); return true; } catch { return false; } }, parse: (v) => JSON.parse(v) },
+        array: { test: (v) => { try { const parsed = JSON.parse(v); return Array.isArray(parsed); } catch { return false; } }, parse: (v) => JSON.parse(v) },
+        null: { test: (v) => v === 'null' || v === '', parse: () => null }
+      };
+
+      const definitions = { ...defaultDefinitions, ...userDefinitions };
 
       // Only apply custom casting to object-based rows
       if (typeof processedData[0] === 'object' && processedData[0] !== null) {
-        return processedData.map((row: Record<string, any>, rowIndex: number) => {
+        processedData = processedData.map((row: Record<string, any>, rowIndex: number) => {
           const newRow = { ...row };
 
           for (const columnName in row) {
@@ -858,7 +839,6 @@ export class CSV<T extends Record<string, any>> {
                 quoting: false
               };
 
-              let castSuccessful = false;
               let castedValue: any = originalValue; // Default to original value
 
               // Function to apply a caster
@@ -866,7 +846,6 @@ export class CSV<T extends Record<string, any>> {
                 if (caster.test(valueToTestAndParse, context)) {
                   try {
                     castedValue = caster.parse(valueToTestAndParse, context);
-                    castSuccessful = true;
                     return true; // Caster applied successfully
                   } catch (e) {
                     if (onCastError === 'error') {
@@ -905,20 +884,8 @@ export class CSV<T extends Record<string, any>> {
                 }
               }
 
-              // 2. If no column-specific caster succeeded, try global casters
-              if (!castSuccessful && definitions) {
-                // Predefined order for more predictable behavior
-                const orderedGlobalKeys: (keyof CustomCastDefinition)[] = [
-                  'null', 'boolean', 'number', 'date', 'object', 'array', 'string'
-                ];
-
-                for (const defKey of orderedGlobalKeys) {
-                  const globalCaster = definitions[defKey];
-                  if (globalCaster && applyCaster(globalCaster)) {
-                    break; // First successful global caster wins
-                  }
-                }
-              }
+              // 2. Global casters are not automatically applied - only column-specific casters are used
+              // This prevents unexpected type conversions on columns that weren't explicitly configured
 
               // Set the potentially modified value in the new row
               newRow[columnName] = castedValue;
@@ -928,6 +895,19 @@ export class CSV<T extends Record<string, any>> {
           return newRow as T;
         });
       }
+    }
+
+    // Validate for empty values if requested
+    if (options.allowEmptyValues === false && processedData.length > 0) {
+      processedData.forEach((row, i) => {
+        if (typeof row === 'object' && row !== null) {
+          for (const [key, value] of Object.entries(row)) {
+            if (value === '' || value === null || value === undefined) {
+              throw new CSVError(`empty value found at line ${baseLineNumber + i}, column ${key}`);
+            }
+          }
+        }
+      });
     }
 
     // No header mapping or custom casting needed, or non-object rows
@@ -975,6 +955,9 @@ export class CSV<T extends Record<string, any>> {
 
       return new CSV<T>(parsedData as T[]);
     } catch (error) {
+      if (error instanceof CSVError) {
+        throw error;
+      }
       throw new CSVError('Failed to parse CSV string', error instanceof Error ? error : new Error(String(error)));
     }
   }
@@ -1131,10 +1114,33 @@ export class CSV<T extends Record<string, any>> {
 
       // Apply header mapping if provided
       if (options.headerMap) {
+        // Generate headers from headerMap and data
+        const generatedHeaders: string[] = [];
+        for (const [key, mapping] of Object.entries(options.headerMap)) {
+          if (typeof mapping === 'string') {
+            generatedHeaders.push(mapping);
+          } else if (typeof mapping === 'object' && mapping !== null && (mapping as any)._type === 'targetArrayToCsv') {
+            const arrayRule = mapping as ObjectArrayToCsvConfig;
+            if (arrayRule.targetCsvColumns) {
+              generatedHeaders.push(...arrayRule.targetCsvColumns);
+            } else if (arrayRule.targetCsvColumnPrefix) {
+              // Find max length of the array in data
+              const maxLength = this.data.reduce((max, item) => {
+                const arr = lodashGet(item, key);
+                return Array.isArray(arr) ? Math.max(max, arr.length) : max;
+              }, 0);
+              const limit = arrayRule.maxColumns !== undefined ? Math.min(arrayRule.maxColumns, maxLength) : maxLength;
+              for (let i = 1; i <= limit; i++) {
+                generatedHeaders.push(`${arrayRule.targetCsvColumnPrefix}${i}`);
+              }
+            }
+          }
+        }
+
         const stringifyOptions = options.stringifyOptions || { header: true };
         const headers = Array.isArray(stringifyOptions.header)
           ? stringifyOptions.header
-          : Object.keys(this.data[0] || {});
+          : generatedHeaders;
 
         const { toRowArr } = createHeaderMapFns<T>(options.headerMap);
 
@@ -1151,7 +1157,7 @@ export class CSV<T extends Record<string, any>> {
           // Create transform stream for header mapping
           const headerMapTransform = new Transform({
             objectMode: true,
-            transform(chunk, encoding, callback) {
+            transform(chunk, _encoding, callback) {
               try {
                 const mappedRow = toRowArr(chunk, headers);
                 callback(null, mappedRow);
@@ -1294,17 +1300,40 @@ export class CSV<T extends Record<string, any>> {
 
         // Apply header mapping if provided
         if (options.headerMap) {
+          // Generate headers from headerMap and data
+          const generatedHeaders: string[] = [];
+          for (const [key, mapping] of Object.entries(options.headerMap)) {
+            if (typeof mapping === 'string') {
+              generatedHeaders.push(mapping);
+            } else if (typeof mapping === 'object' && mapping !== null && (mapping as any)._type === 'targetArrayToCsv') {
+              const arrayRule = mapping as ObjectArrayToCsvConfig;
+              if (arrayRule.targetCsvColumns) {
+                generatedHeaders.push(...arrayRule.targetCsvColumns);
+              } else if (arrayRule.targetCsvColumnPrefix) {
+                // Find max length of the array in data
+                const maxLength = this.data.reduce((max, item) => {
+                  const arr = lodashGet(item, key);
+                  return Array.isArray(arr) ? Math.max(max, arr.length) : max;
+                }, 0);
+                const limit = arrayRule.maxColumns !== undefined ? Math.min(arrayRule.maxColumns, maxLength) : maxLength;
+                for (let i = 1; i <= limit; i++) {
+                  generatedHeaders.push(`${arrayRule.targetCsvColumnPrefix}${i}`);
+                }
+              }
+            }
+          }
+
           // Get headers
           const headers = Array.isArray(stringifyOptions.header)
             ? stringifyOptions.header
-            : Object.keys(this.data[0] || {});
+            : generatedHeaders;
 
           const { toRowArr } = createHeaderMapFns<T>(options.headerMap);
 
           // Create a transform stream that applies the header mapping
           const transformer = new Transform({
             objectMode: true,
-            transform(chunk, encoding, callback) {
+            transform(chunk, _encoding, callback) {
               try {
                 const mappedRow = toRowArr(chunk, headers);
                 callback(null, mappedRow);
@@ -1438,14 +1467,14 @@ export class CSV<T extends Record<string, any>> {
   private static async _validateWithSchemaAsync<T extends Record<string, any>>(
     data: Record<string, any>[],
     schemaConfig: CSVSchemaConfig<T>,
-    baseLineNumber: number = 1
+    _baseLineNumber: number = 1
   ): Promise<[T[], RowValidationResult<T>[]]> {
     const { rowSchema, columnSchemas, validationMode = 'error' } = schemaConfig;
     const validationResults: RowValidationResult<T>[] = [];
     const validatedData: T[] = [];
 
     // Function to validate a row asynchronously
-    const validateRowAsync = async (row: Record<string, any>, index: number): Promise<RowValidationResult<T>> => {
+    const validateRowAsync = async (row: Record<string, any>, _index: number): Promise<RowValidationResult<T>> => {
       const result: RowValidationResult<T> = {
         originalRow: row,
         valid: true
@@ -1567,12 +1596,35 @@ export class CSV<T extends Record<string, any>> {
       const headerMap = options.headerMap;
       const stringifyOptions = options.stringifyOptions || { header: true };
 
-      if (headerMap) {
-        const headers = Array.isArray(stringifyOptions.header)
-          ? stringifyOptions.header
-          : Object.keys(this.data[0] || {});
+  if (headerMap) {
+    // Generate headers from headerMap and data
+    const generatedHeaders: string[] = [];
+    for (const [key, mapping] of Object.entries(headerMap)) {
+      if (typeof mapping === 'string') {
+        generatedHeaders.push(mapping);
+      } else if (typeof mapping === 'object' && mapping !== null && (mapping as any)._type === 'targetArrayToCsv') {
+        const arrayRule = mapping as ObjectArrayToCsvConfig;
+        if (arrayRule.targetCsvColumns) {
+          generatedHeaders.push(...arrayRule.targetCsvColumns);
+        } else if (arrayRule.targetCsvColumnPrefix) {
+          // Find max length of the array in data
+          const maxLength = this.data.reduce((max, item) => {
+            const arr = lodashGet(item, key);
+            return Array.isArray(arr) ? Math.max(max, arr.length) : max;
+          }, 0);
+          const limit = arrayRule.maxColumns !== undefined ? Math.min(arrayRule.maxColumns, maxLength) : maxLength;
+          for (let i = 1; i <= limit; i++) {
+            generatedHeaders.push(`${arrayRule.targetCsvColumnPrefix}${i}`);
+          }
+        }
+      }
+    }
 
-        const { toRowArr } = createHeaderMapFns<T>(headerMap);
+    const headers = Array.isArray(stringifyOptions.header)
+      ? stringifyOptions.header
+      : generatedHeaders;
+
+    const { toRowArr } = createHeaderMapFns<T>(headerMap);
 
         // Transform the data through the header map
         const rows = this.data.map(item => toRowArr(item, headers));
@@ -1602,8 +1654,8 @@ export class CSV<T extends Record<string, any>> {
     if (options && 'stringifyOptions' in options) {
       return stringifyCSV(this.data, options.stringifyOptions || { header: true });
     }
-    // Handle case when options is a direct stringify options object
-    return stringifyCSV(this.data, options as Parameters<typeof stringifyCSV>[1] || { header: true });
+  // Handle case when options is a direct stringify options object
+  return stringifyCSV(this.data, { header: true, ...(options as Parameters<typeof stringifyCSV>[1] || {}) });
   }
 
   /**
@@ -2162,39 +2214,14 @@ export class CSV<T extends Record<string, any>> {
     const otherData = other instanceof CSV ? other.toArray() : other;
     const result: T[] = [];
 
-    // Use a more efficient algorithm by creating an index for faster lookups
-    // We'll use a Map to group otherData items by their key characteristics
-    // This is a heuristic that may not work for all equality functions, but works for many common cases
-    const createKey = (item: T | E): string => {
-      if (typeof item !== 'object' || item === null) return String(item);
-      // Use the first few properties as a rough index
-      return Object.entries(item)
-        .slice(0, 3)
-        .map(([k, v]) => `${k}:${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
-        .join('|');
-    };
-
-    // Index the other array for faster lookups
-    const otherMap = new Map<string, E[]>();
-    for (const itemB of otherData) {
-      const key = createKey(itemB);
-      if (!otherMap.has(key)) {
-        otherMap.set(key, []);
-      }
-      otherMap.get(key)!.push(itemB);
-    }
-
-    // Track processed items from both arrays
+    // Track processed items from B
     const processedB = new Set<E>();
 
     // First pass: find matches and merge them
     for (const itemA of this.data) {
-      const key = createKey(itemA);
-      const potentialMatches = otherMap.get(key) || [];
       let matched = false;
 
-      // Only iterate through potential matches that share the same key
-      for (const itemB of potentialMatches) {
+      for (const itemB of otherData) {
         if (processedB.has(itemB)) continue;
 
         if (equalityFn(itemA, itemB)) {
@@ -2218,7 +2245,7 @@ export class CSV<T extends Record<string, any>> {
       }
     }
 
-    return new CSV<T>(result, this.additionalHeader);
+    return CSV.fromData(result);
   }
 
   /**
@@ -3457,7 +3484,7 @@ export class CSV<T extends Record<string, any>> {
       if (options.headerMap && options.headerMap) { // Ensure options.headerMap is truthy
         const headerMapTransform: Transform = new Transform({
           objectMode: true, // Expects objects from mainCsvParser, outputs mapped objects
-          transform(parsedRow: Record<string, any>, encoding, callback) { // Input is from mainCsvParser
+          transform(parsedRow: Record<string, any>, _encoding, callback) { // Input is from mainCsvParser
             try {
               // Ensure options.headerMap is valid and createHeaderMapFns returns the expected functions
               const mappedRow = createHeaderMapFns<SourceRowType>(options.headerMap!).fromRowArr(parsedRow);
@@ -3555,6 +3582,10 @@ export const CSVUtils = {
    * @returns True if the string appears to be valid CSV
    */
   isValidCSV(str: string): boolean {
+    // Basic check: must contain at least one comma or newline to be considered CSV
+    if (!str.includes(',') && !str.includes('\n')) {
+      return false;
+    }
     try {
       parseCSV(str, { to: 5 });
       return true;
@@ -3599,18 +3630,20 @@ export const CSVUtils = {
    * @returns Transform stream
    */
   createTransformer<T, R>(transform: (row: T) => R): NodeTransform {
-    return new Transform({
-      objectMode: true,
-      transform(chunk, encoding, callback) {
+    return new class extends Transform {
+      constructor() {
+        super({ objectMode: true });
+      }
+
+      _transform(chunk: T, _encoding: string, callback: (error?: Error | null, data?: R) => void) {
         try {
           const transformed = transform(chunk);
           callback(null, transformed);
         } catch (error) {
-          // @ts-expect-error
-          callback(error);
+          callback(error as Error);
         }
       }
-    });
+    }();
   },
 
   /**
@@ -3741,30 +3774,22 @@ export async function* csvGenerator<T extends Record<string, any>>(
   options: CSVStreamOptions<T> = {}
 ): AsyncGenerator<T, void, undefined> {
   const resolvedPath = path.resolve(filename);
-  const stream = fs.createReadStream(resolvedPath);
-  const parser = parseCSVAsync({
+  const csvContent = fs.readFileSync(resolvedPath, 'utf-8');
+
+  const csvOptions = {
     ...options.csvOptions,
     columns: true // Ensure we get objects, not arrays
-  });
+  };
 
-  stream.pipe(parser);
+  const records = parseCSV(csvContent, csvOptions) as T[];
 
   const headerMap = options.headerMap;
   const transformFn = options.transform;
+  const { fromRowArr } = headerMap ? createHeaderMapFns<T>(headerMap) : { fromRowArr: null };
 
-  if (headerMap) {
-    // Use header mapping
-    const { fromRowArr } = createHeaderMapFns<T>(headerMap);
-
-    for await (const record of parser) {
-      const mappedRecord = fromRowArr(record);
-      yield transformFn ? transformFn(mappedRecord) : mappedRecord;
-    }
-  } else {
-    // Standard processing without header mapping
-    for await (const record of parser) {
-      yield transformFn ? transformFn(record) : record as T;
-    }
+  for (const record of records) {
+    const processedRecord = fromRowArr ? fromRowArr(record) : record;
+    yield transformFn ? transformFn(processedRecord) : processedRecord;
   }
 }
 
@@ -3811,78 +3836,18 @@ export async function writeCSVFromGenerator<T extends Record<string, any>>(
     ? filename
     : `${filename}.csv`;
 
-  return new Promise((resolve, reject) => {
-    try {
-      const stringifyOptions = options.stringifyOptions || { header: true };
-      // Use a type assertion to help TypeScript understand this is valid
-      const stringifier = stringifyCSVAsync(stringifyOptions) as Transform;
-
-      const writable = fs.createWriteStream(outputPath, { encoding: 'utf-8' });
-
-      if (options.additionalHeader) {
-        writable.write(options.additionalHeader);
-      }
-
-      writable.on('finish', resolve);
-      writable.on('error', reject);
-
-      if (options.headerMap) {
-        // With header mapping
-        (async () => {
-          try {
-            // Get headers
-            const headers = Array.isArray(stringifyOptions.header)
-              ? stringifyOptions.header
-              : [];
-
-            const headerMap = options.headerMap as HeaderMap<T>
-            const { toRowArr } = createHeaderMapFns<T>(headerMap);
-
-            // Create a transform stream that applies the header mapping
-            const transformer = new Transform({
-              objectMode: true,
-              transform(chunk, encoding, callback) {
-                try {
-                  const mappedRow = toRowArr(chunk, headers);
-                  callback(null, mappedRow);
-                } catch (error) {
-                  // @ts-ignore
-                  callback(error);
-                }
-              }
-            });
-
-            transformer.pipe(stringifier).pipe(writable);
-
-            for await (const row of generator) {
-              transformer.write(row);
-            }
-
-            transformer.end();
-          } catch (error) {
-            reject(new CSVError('Failed to write CSV from generator with header mapping', error));
-          }
-        })();
-      } else {
-        // Without header mapping
-        (async () => {
-          try {
-            stringifier.pipe(writable);
-
-            for await (const row of generator) {
-              stringifier.write(row);
-            }
-
-            stringifier.end();
-          } catch (error) {
-            reject(new CSVError('Failed to write CSV from generator', error));
-          }
-        })();
-      }
-    } catch (error) {
-      reject(new CSVError('Failed to set up CSV writing from generator', error));
+  try {
+    const data: T[] = [];
+    for await (const row of generator) {
+      data.push(row);
     }
-  });
+
+    // Use the synchronous writeToFile method
+    const csv = CSV.fromData(data);
+    csv.writeToFile(outputPath, options);
+  } catch (error) {
+    throw new CSVError('Failed to write CSV from generator', error);
+  }
 }
 
 /**
@@ -3997,7 +3962,7 @@ export const CSVArrayUtils = {
 
     const inverseMap: { [x: string]: string;[x: number]: string } = {};
     for (const [key, value] of Object.entries(headerMap)) {
-      if (typeof value === 'string') {
+      if (typeof value === 'string' || typeof value === 'number') {
         inverseMap[value] = key;
       }
     }
@@ -4182,7 +4147,7 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
     return this._cloneWithNewTransform<OutType>((currentStream: Readable) => {
       const filterTransform = new Transform({
         objectMode: true,
-        async transform(row: OutType, encoding, callback) {
+        async transform(row: OutType, _encoding, callback) {
           try {
             if (await condition(row)) { // Await condition if it's async
               this.push(row);
@@ -4215,7 +4180,7 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
     return this._cloneWithNewTransform<NewOutType>((currentStream: Readable) => {
       const mapTransform = new Transform({
         objectMode: true,
-        async transform(row: OutType, encoding, callback) {
+        async transform(row: OutType, _encoding, callback) {
           try {
             this.push(await transformFn(row)); // Await transformFn if it's async
             callback();
@@ -4251,7 +4216,7 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
     return this._cloneWithNewTransform<OutType & Record<NewKey, NewValue>>((currentStream: Readable) => {
       const addColumnTransform = new Transform({
         objectMode: true,
-        async transform(row: OutType, encoding, callback) {
+        async transform(row: OutType, _encoding, callback) {
           try {
             const newValue = typeof valueOrFn === 'function'
               ? await (valueOrFn as (row: OutType) => NewValue | Promise<NewValue>)(row)
@@ -4308,7 +4273,7 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
    * @param options Options for the pipe operation (e.g., `{ end?: boolean }`).
    * @returns A new `CSVStreamProcessor` instance configured for piping.
    */
-  preparePipeTo(destination: Writable, options?: { end?: boolean }): CSVStreamProcessor<InType, OutType> {
+  preparePipeTo(destination: Writable, _options?: { end?: boolean }): CSVStreamProcessor<InType, OutType> {
     return this._cloneWithTerminalAction({
       type: TerminalActionType.PipeTo, destinationStream: destination,
       // pipeOptions: options 

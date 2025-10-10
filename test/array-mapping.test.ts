@@ -3,11 +3,7 @@ import fs from 'fs';
 import { HeaderMap, createHeaderMapFns, CsvToArrayConfig, ObjectArrayToCsvConfig } from '../src/headers';
 import CSV, { CSVError } from '../src';
 
-// Simple mock for fs
-vi.mock('fs', () => ({
-  readFileSync: vi.fn(),
-  writeFileSync: vi.fn(),
-}));
+
 
 describe('Array Mapping Feature', () => {
   describe('CSV to array mapping', () => {
@@ -227,8 +223,8 @@ describe('Array Mapping Feature', () => {
 
       // Define the header map with array-to-columns mapping
       const headerMap: HeaderMap<any> = {
-        'id': 'product_id',
-        'name': 'product_name',
+        'product_id': 'id',
+        'product_name': 'name',
         'images': {
           _type: 'targetArrayToCsv',
           targetCsvColumns: ['main_image', 'thumbnail', 'banner_image']
@@ -261,8 +257,8 @@ describe('Array Mapping Feature', () => {
 
       // Define the header map with array-to-columns mapping
       const headerMap: HeaderMap<any> = {
-        'id': 'product_id',
-        'name': 'product_name',
+        'product_id': 'id',
+        'product_name': 'name',
         'images': {
           _type: 'targetArrayToCsv',
           targetCsvColumnPrefix: 'image_'
@@ -295,8 +291,8 @@ describe('Array Mapping Feature', () => {
 
       // Define the header map with array-to-columns mapping
       const headerMap: HeaderMap<any> = {
-        'id': 'product_id',
-        'name': 'product_name',
+        'product_id': 'id',
+        'product_name': 'name',
         'images': {
           _type: 'targetArrayToCsv',
           targetCsvColumns: ['main_image', 'thumbnail', 'banner_image'],
@@ -330,8 +326,8 @@ describe('Array Mapping Feature', () => {
 
       // Define the header map with array-to-columns mapping and max columns
       const headerMap: HeaderMap<any> = {
-        'id': 'product_id',
-        'name': 'product_name',
+        'product_id': 'id',
+        'product_name': 'name',
         'images': {
           _type: 'targetArrayToCsv',
           targetCsvColumnPrefix: 'image_',

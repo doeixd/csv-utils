@@ -2,14 +2,14 @@
  * @fileoverview Utilities for data transformation, including header mapping and array processing
  */
 
-import { get as getPath, set as setPath } from 'lodash';
+import getPath from 'lodash/get';
+import setPath from 'lodash/set';
 import { CSVError } from './index';
 
 /**
  * A path string using dot notation to access nested properties
- * @template T - The target object type
  */
-export type Path<T = any> = string;
+export type Path = string;
 
 /**
  * A function used for custom header mapping operations
@@ -24,14 +24,13 @@ export type HeaderMapFn<T = any> = (
 
 /**
  * Configuration for mapping multiple CSV columns to a single array property
- * @template T - The target object type
  */
-export interface CsvToArrayConfig<T = any> {
+export interface CsvToArrayConfig {
   /** Type identifier for the mapping configuration */
   _type: 'csvToTargetArray';
   
   /** The target array property path in dot notation */
-  targetPath: Path<T>;
+  targetPath: Path;
   
   /** Option A: Explicit list of CSV column names in order */
   sourceCsvColumns?: string[];
@@ -74,9 +73,9 @@ export interface ObjectArrayToCsvConfig {
  * @template T - The target object type
  */
 export type HeaderMapValue<T = any> =
-  | Path<T>                   // Direct path like 'profile.name'
+  | Path                   // Direct path like 'profile.name'
   | HeaderMapFn<T>            // Custom mapping function
-  | CsvToArrayConfig<T>       // CSV columns -> object array property configuration
+  | CsvToArrayConfig       // CSV columns -> object array property configuration
   | ObjectArrayToCsvConfig;   // Object array property -> CSV columns configuration
 
 /**
@@ -162,17 +161,25 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
     if (!headerMap || typeof headerMap !== 'object') {
       throw new CSVError('Header map must be a non-null object');
     }
-    
+
     if (Object.keys(headerMap).length === 0) {
       throw new CSVError('Header map cannot be empty');
     }
   };
-  
+
+  // Create inverse map for toRowArr
+  const inverseMap: HeaderMap<any> = {};
+  for (const [key, value] of Object.entries(headerMap)) {
+    if (typeof value === 'string') {
+      inverseMap[value] = isNaN(Number(key)) ? key : Number(key);
+    }
+  }
+
   // Helper function to ensure array exists at path
   const ensureArrayAtPath = (obj: any, path: string): any[] => {
     let current = obj;
     const parts = path.split('.');
-    
+
     // Navigate to the parent object
     for (let i = 0; i < parts.length - 1; i++) {
       if (!current[parts[i]]) {
@@ -180,7 +187,7 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
       }
       current = current[parts[i]];
     }
-    
+
     // Create array if it doesn't exist
     const lastPart = parts[parts.length - 1];
     if (!current[lastPart]) {
@@ -189,10 +196,10 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
       // Convert to array if not already one
       current[lastPart] = [current[lastPart]];
     }
-    
+
     return current[lastPart] as any[];
   };
-  
+
   // Validate once during creation
   validateHeaderMap();
   
@@ -211,14 +218,15 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
     fromRowArr: (rowArr: RowArr | Record<string, any>, allHeaders?: string[]): To & Record<string, any> => {
       const to = {} as To & Record<string, any>;
       const handledCsvHeaders = new Set<string | number>();
-      
+
+      // Determine if header map uses string keys
+      const hasStringKeys = Object.keys(headerMap).some(k => isNaN(Number(k)));
+
       // Convert array to object if needed and provide headers
       let rowObj: Record<string, any>;
       if (Array.isArray(rowArr)) {
         // If we're dealing with a header-based mapping but have array data,
         // convert the array to an object using header names
-        const hasStringKeys = Object.keys(headerMap).some(k => isNaN(Number(k)));
-        
         if (hasStringKeys && allHeaders) {
           rowObj = {};
           for (let i = 0; i < rowArr.length && i < allHeaders.length; i++) {
@@ -240,7 +248,7 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
         
         // Check if rule is a CsvToArrayConfig
         if (rule && typeof rule === 'object' && (rule as any)._type === 'csvToTargetArray') {
-          const arrayRule = rule as CsvToArrayConfig<To>;
+          const arrayRule = rule as CsvToArrayConfig;
           const collectedItems: { value: any; sortKey?: string | number; sourceHeader: string | number }[] = [];
           
           // Determine which headers to scan for matches
@@ -351,11 +359,13 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
       };
       
       // Process all source keys
-      if (Array.isArray(rowArr)) {
+      if (Array.isArray(rowArr) && !(hasStringKeys && allHeaders)) {
+        // Use array indices only when we didn't convert to object
         for (let i = 0; i < rowArr.length; i++) {
           processHeaderMapping(i, rowArr[i]);
         }
       } else {
+        // Use object keys when we have an object (either input was object or converted from array)
         for (const [key, value] of Object.entries(rowObj)) {
           processHeaderMapping(key, value);
         }
@@ -394,15 +404,15 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
       // Determine if mapping is index-based
       const isIndexBased = Object.keys(headerMap).every(k => !isNaN(Number(k)));
       
-      // Process array-to-csv mappings first
+      // Process array-to-csv mappings first (using original headerMap)
       for (const objectPath in headerMap) {
         const mappingRule = headerMap[objectPath];
-        
+
         // Handle array-to-csv mappings
         if (typeof mappingRule === 'object' && mappingRule !== null && (mappingRule as any)._type === 'targetArrayToCsv') {
           const arrayRule = mappingRule as ObjectArrayToCsvConfig;
           const sourceArray = getPath(objAfterMapWasApplied, objectPath);
-          
+
           if (Array.isArray(sourceArray)) {
             if (arrayRule.targetCsvColumns) {
               // Fixed column names
@@ -410,7 +420,7 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
                 const csvColName = arrayRule.targetCsvColumns[i];
                 const value = i < sourceArray.length ? sourceArray[i] : null;
                 const outputValue = value ?? arrayRule.emptyCellOutput ?? '';
-                
+
                 if (isIndexBased) {
                   // For index-based mapping, find the index of this column name
                   for (const [idx, headerName] of Object.entries(headers)) {
@@ -425,15 +435,15 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
               }
             } else if (arrayRule.targetCsvColumnPrefix) {
               // Dynamic column names with prefix
-              const limit = arrayRule.maxColumns !== undefined 
-                ? Math.min(arrayRule.maxColumns, sourceArray.length) 
+              const limit = arrayRule.maxColumns !== undefined
+                ? Math.min(arrayRule.maxColumns, sourceArray.length)
                 : sourceArray.length;
-              
+
               for (let i = 0; i < limit; i++) {
                 const csvColName = `${arrayRule.targetCsvColumnPrefix}${i + 1}`;
                 const value = sourceArray[i];
                 const outputValue = value ?? arrayRule.emptyCellOutput ?? '';
-                
+
                 if (isIndexBased) {
                   // For index-based mapping, find the index of this column name
                   for (const [idx, headerName] of Object.entries(headers)) {
@@ -447,40 +457,52 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
                 }
               }
             }
-            
+
             handledPaths.add(objectPath);
           }
-          
+
           continue;
         }
-        
-        // Skip non-array special rules during toRowArr
+      }
+
+      // Process standard mappings
+      for (const objectPath in headerMap) {
+        const mappingRule = headerMap[objectPath];
+
+        // Skip array mappings (already handled above)
+        if (typeof mappingRule === 'object' && mappingRule !== null && (mappingRule as any)._type === 'targetArrayToCsv') {
+          continue;
+        }
+
+        // Skip csvToTargetArray mappings
         if (typeof mappingRule === 'object' && mappingRule !== null && (mappingRule as any)._type === 'csvToTargetArray') {
           continue;
         }
         
         // Handle standard direct mappings and function mappings
         if (typeof mappingRule === 'string') {
-          // Direct path mapping: Field path -> CSV header name
-          const csvHeaderName = mappingRule;
-          let value = getPath(objAfterMapWasApplied, objectPath);
-          
+          let value = getPath(objAfterMapWasApplied, mappingRule);
+
           if (value !== undefined) {
             value = processValueForOutput(value, objectPath, transformFn);
-            
+
             if (isIndexBased) {
-              // For index-based mapping, find the numeric index of this column name
-              for (const [idx, headerName] of Object.entries(headers)) {
-                if (headerName === csvHeaderName) {
-                  row[Number(idx)] = value;
-                  break;
-                }
-              }
+              // For index-based mapping, objectPath is the index
+              row[Number(objectPath)] = value;
             } else {
-              rowObj[csvHeaderName] = value;
+              // For header-based mapping, objectPath is the CSV header name
+              rowObj[objectPath] = value;
             }
           }
-          
+
+          handledPaths.add(objectPath);
+        } else if (typeof mappingRule === 'number') {
+          // This shouldn't happen for standard mappings, but handle just in case
+          let value = getPath(objAfterMapWasApplied, objectPath);
+          if (value !== undefined) {
+            value = processValueForOutput(value, objectPath, transformFn);
+            row[mappingRule] = value;
+          }
           handledPaths.add(objectPath);
         } else if (typeof mappingRule === 'function') {
           // Function mapping
@@ -499,9 +521,9 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
       // For header-based output, convert the object to an array
       if (!isIndexBased) {
         if (!headers || headers.length === 0) {
-          throw new CSVError('Headers array is required for header-based mapping');
+          headers = Object.keys(headerMap);
         }
-        
+
         for (let i = 0; i < headers.length; i++) {
           const headerName = headers[i];
           row[i] = rowObj[headerName] !== undefined ? rowObj[headerName] : '';

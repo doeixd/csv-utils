@@ -3,16 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import CSV, { CSVError } from '../src';
 
-// Simple mock for fs
-vi.mock('fs', () => ({
-  readFileSync: vi.fn(),
-  writeFileSync: vi.fn(),
-}));
 
-// Simple mock for path
-vi.mock('path', () => ({
-  resolve: vi.fn(p => p),
-}));
 
 describe('Custom Casting Feature', () => {
   const csvContent = 'id,name,price,inStock\n1,Product A,100,true\n2,Product B,200,false\n3,Product C,300,true';

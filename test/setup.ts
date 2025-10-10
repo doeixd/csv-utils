@@ -2,6 +2,20 @@ import { vi } from 'vitest';
 
 // Define any global mock configuration here
 vi.mock('fs', () => ({
+  default: {
+    readFileSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    createReadStream: vi.fn(),
+    createWriteStream: vi.fn(),
+    existsSync: vi.fn(),
+    mkdtempSync: vi.fn(),
+    unlinkSync: vi.fn(),
+    statSync: vi.fn(),
+    promises: {
+      readFile: vi.fn(),
+      writeFile: vi.fn(),
+    }
+  },
   readFileSync: vi.fn(),
   writeFileSync: vi.fn(),
   createReadStream: vi.fn(),
@@ -17,6 +31,10 @@ vi.mock('fs', () => ({
 }));
 
 vi.mock('path', () => ({
+  default: {
+    resolve: vi.fn((p) => p),
+    join: vi.fn((dir, file) => `${dir}/${file}`),
+  },
   resolve: vi.fn((p) => p),
   join: vi.fn((dir, file) => `${dir}/${file}`),
 }));
@@ -54,6 +72,24 @@ vi.mock('stream', () => {
   const actual = vi.importActual('stream');
   return {
     ...actual,
+    Readable: vi.fn().mockImplementation(() => ({
+      on: vi.fn().mockImplementation(function(event, callback) {
+        if (event === 'data') {
+          setTimeout(() => callback('mock data'), 10);
+        } else if (event === 'end') {
+          setTimeout(() => callback(), 10);
+        }
+        return this;
+      }),
+      pipe: vi.fn().mockReturnValue({
+        on: vi.fn().mockImplementation(function(event, callback) {
+          if (event === 'end') {
+            setTimeout(() => callback(), 10);
+          }
+          return this;
+        })
+      })
+    })),
     Transform: vi.fn().mockImplementation(() => ({
       write: vi.fn().mockReturnValue(true),
       pipe: vi.fn().mockReturnValue({

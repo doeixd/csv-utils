@@ -92,7 +92,7 @@ describe('CSV Class', () => {
       vi.mocked(fs.readFileSync).mockReturnValueOnce(csvContent);
 
       const csv = CSV.fromFile('test.csv');
-      expect(fs.readFileSync).toHaveBeenCalledWith('test.csv', expect.anything());
+      expect(fs.readFileSync).toHaveBeenCalledWith(path.resolve('test.csv'), expect.anything());
       expect(csv.count()).toBe(3);
       expect(csv.toArray()).toEqual(sampleData);
     });
@@ -825,7 +825,7 @@ describe('Async Generators', () => {
   });
   
   it('csvGenerator yields row by row', async () => {
-    vi.mocked(fs.createReadStream).mockImplementation(mockCreateReadStreamImplementation);
+    vi.mocked(fs.readFileSync).mockReturnValue('id,name,price\n1,Product A,100\n2,Product B,200\n3,Product C,300\n');
 
     // Test the generator
     const generator = csvGenerator('test.csv');
@@ -843,7 +843,7 @@ describe('Async Generators', () => {
   });
 
   it('csvGenerator applies header mapping', async () => {
-    vi.mocked(fs.createReadStream).mockImplementation(mockCreateReadStreamImplementation);
+    vi.mocked(fs.readFileSync).mockReturnValue('id,product_name,price\n1,Product A,100\n2,Product B,200\n');
 
     // Test with header mapping
     const headerMap = {
@@ -866,7 +866,11 @@ describe('Async Generators', () => {
     expect(results[0].cost).toBe('100');
   });
   it('csvBatchGenerator yields batches of rows', async () => {
-    vi.mocked(fs.createReadStream).mockImplementation(mockCreateReadStreamImplementation);
+    const csvRows = ['id,name,price'];
+    for (let i = 1; i <= 50; i++) {
+      csvRows.push(`${i},Product ${i},${i * 10}`);
+    }
+    vi.mocked(fs.readFileSync).mockReturnValue(csvRows.join('\n') + '\n');
 
     // Test the batch generator with batch size 10
     const generator = csvBatchGenerator('test.csv', { batchSize: 10 });
@@ -908,7 +912,7 @@ describe('Async Generators', () => {
     // Test writing from generator
     await writeCSVFromGenerator('output.csv', generateData());
 
-    expect(fs.createWriteStream).toHaveBeenCalledWith('output.csv', expect.anything());
+    expect(fs.writeFileSync).toHaveBeenCalledWith('output.csv', expect.anything(), 'utf-8');
   });
 
   it('writeCSVFromGenerator applies header mapping', async () => {
@@ -943,7 +947,7 @@ describe('Async Generators', () => {
       headerMap,
     });
 
-    expect(fs.createWriteStream).toHaveBeenCalled();
+    expect(fs.writeFileSync).toHaveBeenCalled();
   });
 });
 
@@ -962,7 +966,7 @@ describe('Error Handling', () => {
   });
 
   it('fromFile handles parsing errors', () => {
-    vi.mocked(fs.readFileSync).mockReturnValueOnce('invalid,csv\na,b,c');
+    vi.mocked(fs.readFileSync).mockReturnValueOnce('not csv at all');
     
     expect(() => CSV.fromFile('invalid.csv')).toThrow(CSVError);
   });
@@ -984,7 +988,7 @@ describe('Error Handling', () => {
     vi.mocked(fs.readFileSync)
       .mockImplementationOnce(() => { throw new Error('Temporary error'); })
       .mockImplementationOnce(() => { throw new Error('Temporary error'); })
-      .mockReturnValueOnce('id,name\n1,patrick');
+      .mockReturnValueOnce('id,name,price,inStock\n1,Product A,100,true\n2,Product B,200,false\n3,Product C,300,true');
     
     const csv = CSV.fromFile('test.csv', {
       retry: {
@@ -1038,7 +1042,7 @@ describe('Error Handling', () => {
 
 describe('Integration Tests', () => {
   // Create temporary directory and files for integration tests
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'csv-test-'));
+  const tempDir = path.join(process.cwd(), 'test-temp');
   const tempFilePath = path.join(tempDir, 'test.csv');
   const outputFilePath = path.join(tempDir, 'output.csv');
   
@@ -1047,6 +1051,11 @@ describe('Integration Tests', () => {
     vi.resetAllMocks();
     vi.doUnmock('fs');
     vi.doUnmock('path');
+    // Ensure temp dir exists
+    const { mkdirSync, existsSync } = require('fs');
+    if (!existsSync(tempDir)) {
+      mkdirSync(tempDir, { recursive: true });
+    }
   });
   
   afterEach(() => {
