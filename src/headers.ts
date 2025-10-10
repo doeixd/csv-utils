@@ -171,7 +171,7 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
   const inverseMap: HeaderMap<any> = {};
   for (const [key, value] of Object.entries(headerMap)) {
     if (typeof value === 'string') {
-      inverseMap[value] = isNaN(Number(key)) ? key : Number(key);
+      inverseMap[value] = (isNaN(Number(key)) ? key : Number(key)) as any;
     }
   }
 

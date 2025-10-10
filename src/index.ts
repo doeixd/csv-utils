@@ -400,6 +400,7 @@ export class CSV<T extends Record<string, any>> {
           const columnValidation = tryValidateStandardSchemaSync(schema, row[column]);
           if (columnValidation.issues) {
             result.valid = false;
+            if (!result.columnIssues) result.columnIssues = {};
             result.columnIssues[column] = [...columnValidation.issues];
 
             // If column validation failed but provided a corrected value, use it
@@ -1500,6 +1501,7 @@ export class CSV<T extends Record<string, any>> {
           const columnValidation = await tryValidateStandardSchemaAsync(schema, row[column]);
           if (columnValidation.issues) {
             result.valid = false;
+            if (!result.columnIssues) result.columnIssues = {};
             result.columnIssues[column] = [...columnValidation.issues];
 
             // If column validation failed but provided a corrected value, use it
