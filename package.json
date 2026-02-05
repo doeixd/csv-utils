@@ -85,7 +85,6 @@
     "pridepack"
   ],
   "devDependencies": {
-    "@types/lodash": "^4.17.15",
     "@types/node": "^22.10.2",
     "pridepack": "2.6.4",
     "standard-version": "^9.5.0",
@@ -123,9 +122,8 @@
     "access": "public"
   },
   "dependencies": {
-    "csv": "^6.3.11",
-    "fastest-levenshtein": "^1.0.16",
-    "lodash": "^4.17.21"
+    "csv": "^6.4.1",
+    "fastest-levenshtein": "^1.0.16"
   },
   "types": "./dist/types/index.d.ts",
   "main": "./dist/cjs/production/index.js",

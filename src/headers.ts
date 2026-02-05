@@ -2,8 +2,7 @@
  * @fileoverview Utilities for data transformation, including header mapping and array processing
  */
 
-import getPath from 'lodash/get';
-import setPath from 'lodash/set';
+import { getPathValue, setPathValue } from './path-utils';
 import { CSVError } from './index';
 
 /**
@@ -350,7 +349,7 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
         if (typeof mapping === 'string') {
           // Direct string path mapping
           const processedValue = mergeFn ? mergeFn(to, mapping, value) : value;
-          setPath(to, mapping, processedValue);
+          setPathValue(to, mapping, processedValue);
         } else if (typeof mapping === 'function') {
           // Function mapping
           (mapping as HeaderMapFn<To>)(to, rowObj, String(sourceKey), allHeaders);
@@ -411,7 +410,7 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
         // Handle array-to-csv mappings
         if (typeof mappingRule === 'object' && mappingRule !== null && (mappingRule as any)._type === 'targetArrayToCsv') {
           const arrayRule = mappingRule as ObjectArrayToCsvConfig;
-          const sourceArray = getPath(objAfterMapWasApplied, objectPath);
+          const sourceArray = getPathValue(objAfterMapWasApplied, objectPath);
 
           if (Array.isArray(sourceArray)) {
             if (arrayRule.targetCsvColumns) {
@@ -481,7 +480,7 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
         
         // Handle standard direct mappings and function mappings
         if (typeof mappingRule === 'string') {
-          let value = getPath(objAfterMapWasApplied, mappingRule);
+          let value = getPathValue(objAfterMapWasApplied, mappingRule);
 
           if (value !== undefined) {
             value = processValueForOutput(value, objectPath, transformFn);
@@ -498,7 +497,7 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
           handledPaths.add(objectPath);
         } else if (typeof mappingRule === 'number') {
           // This shouldn't happen for standard mappings, but handle just in case
-          let value = getPath(objAfterMapWasApplied, objectPath);
+          let value = getPathValue(objAfterMapWasApplied, objectPath);
           if (value !== undefined) {
             value = processValueForOutput(value, objectPath, transformFn);
             row[mappingRule] = value;
@@ -762,7 +761,7 @@ export function groupByField<T>(
   field: string
 ): Record<string, (T & Record<string, any>)[]> {
   return data.reduce((groups, item) => {
-    const key = String(getPath(item, field) ?? 'undefined');
+    const key = String(getPathValue(item, field) ?? 'undefined');
     if (!groups[key]) {
       groups[key] = [];
     }

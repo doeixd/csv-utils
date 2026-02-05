@@ -9,7 +9,8 @@ import path from 'node:path';
 import { parse as parseCSV, stringify as stringifyCSV } from 'csv/sync';
 import { parse as parseCSVAsync, stringify as stringifyCSVAsync } from 'csv';
 import { distance as levenshteinDistance } from 'fastest-levenshtein';
-import lodashGet from 'lodash/get';
+import { getPathValue } from './path-utils';
+import type { Options as CsvParseOptionsType } from 'csv-parse';
 import { createHeaderMapFns, HeaderMap, RetryOptions, ObjectArrayToCsvConfig } from './headers'
 import { tryValidateStandardSchemaSync, tryValidateStandardSchemaAsync, CSVSchemaConfig, RowValidationResult } from './schema'
 import { Readable, Transform, Writable, pipeline as streamPipeline } from 'node:stream';
@@ -54,8 +55,24 @@ export class CSVError extends Error {
   }
 }
 
-export type CsvParseOptions = Parameters<typeof parseCSV>[1];
-type CsvParseInternalOptions = Exclude<Parameters<typeof parseCSV>[1], null | undefined>
+export type CsvParseOptions<T = string[]> = CsvParseOptionsType<T>;
+type CsvParseInternalOptions<T = string[]> = CsvParseOptionsType<T>;
+type CsvParseOptionsWithColumns<T> = Omit<CsvParseOptionsType<T>, 'columns'> & {
+  columns: Exclude<CsvParseOptionsType<T>['columns'], undefined | false>;
+};
+
+const normalizeLineNumber = (value: string | number | null | undefined): number | undefined => {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+
+  const numeric = typeof value === 'string' ? Number(value) : value;
+  if (!Number.isFinite(numeric)) {
+    return undefined;
+  }
+
+  return numeric >= 1 ? numeric : undefined;
+};
 
 export type CsvStringifyOptions<T = any> = Parameters<typeof stringifyCSV>[1] | {
   stringifyOptions?: Parameters<typeof stringifyCSV>[1];
@@ -149,7 +166,7 @@ export interface CSVReadOptions<T extends Record<string, any>> {
     end?: number;
     highWaterMark?: number;
   };
-  csvOptions?: Parameters<typeof parseCSV>[1];
+  csvOptions?: CsvParseOptions<T>;
   /** Optional transform function to apply to raw file content */
   transform?: (content: string) => string;
   /** Flag to indicate the input is raw data rather than a filename */
@@ -189,7 +206,7 @@ export interface CSVReadOptions<T extends Record<string, any>> {
    * internally for preamble extraction. You should primarily use this for options
    * like `delimiter`, `quote`, `escape`, `record_delimiter`, `ltrim`, `rtrim`, `bom`.
    */
-  additionalHeaderParseOptions?: Parameters<typeof parseCSV>[1];
+  additionalHeaderParseOptions?: CsvParseOptions<any>;
   /**
    * Custom type casting options that are applied after csv-parse's built-in casting
    * but before data validation
@@ -242,7 +259,7 @@ export interface CSVWriteOptions<T = any> {
  */
 export interface CSVStreamOptions<T> {
   /** CSV parsing options */
-  csvOptions?: Parameters<typeof parseCSVAsync>[0];
+  csvOptions?: CsvParseOptions<T>;
   /** Options for transforming rows */
   transform?: (row: any) => T;
   /** Batch size for processing */
@@ -537,10 +554,9 @@ export class CSV<T extends Record<string, any>> {
 
       let fileAdditionalHeader = '';
 
-      const getCsvFromLineValue = (csvOpts?: CsvParseOptions): number | undefined => {
+      const getCsvFromLineValue = (csvOpts?: CsvParseOptions<any>): number | undefined => {
         if (!csvOpts) return undefined;
-        const fromVal = csvOpts.from ?? csvOpts.from_line ?? csvOpts.fromLine;
-        return typeof fromVal === 'number' && fromVal >= 1 ? fromVal : undefined;
+        return normalizeLineNumber(csvOpts.from ?? csvOpts.from_line ?? csvOpts.fromLine);
       };
 
       let numPreambleLinesToExtract: number | undefined = undefined;
@@ -593,9 +609,9 @@ export class CSV<T extends Record<string, any>> {
       const contentForMainParsing = options.transform ? options.transform(rawFullContent.trim()) : rawFullContent.trim();
       // Explicitly set columns: true as the default, then spread user options for clarity and consistency
       // This ensures the desired default behavior while still allowing user overrides if needed
-      const finalMainParserOptions: CsvParseInternalOptions = {
+      const finalMainParserOptions: CsvParseInternalOptions<any> = {
         columns: true,
-        ...(options.csvOptions || {})
+        ...((options.csvOptions as CsvParseOptions<any> | undefined) || {})
       };
 
       // Set relax_column_count if validateData is enabled to allow validation to catch inconsistencies
@@ -609,16 +625,23 @@ export class CSV<T extends Record<string, any>> {
 
       if (numPreambleLinesToExtract && numPreambleLinesToExtract > 0) {
         const startDataAfterPreamble = numPreambleLinesToExtract + 1;
-        if (!finalMainParserOptions.from_line || finalMainParserOptions.from_line < startDataAfterPreamble) {
+        const currentFromLine = normalizeLineNumber(finalMainParserOptions.from_line);
+        if (!currentFromLine || currentFromLine < startDataAfterPreamble) {
           finalMainParserOptions.from_line = startDataAfterPreamble;
         }
       }
-      if (finalMainParserOptions.from_line !== undefined && finalMainParserOptions.from_line < 1) {
+
+      const normalizedFromLine = normalizeLineNumber(finalMainParserOptions.from_line);
+      if (normalizedFromLine !== undefined) {
+        finalMainParserOptions.from_line = normalizedFromLine;
+      } else {
         delete finalMainParserOptions.from_line;
       }
 
-      const toLineForData = finalMainParserOptions.to_line ?? finalMainParserOptions.toLine;
-      if (toLineForData !== undefined && finalMainParserOptions.to === undefined) { finalMainParserOptions.to = toLineForData; }
+      const toLineForData = normalizeLineNumber(finalMainParserOptions.to_line ?? finalMainParserOptions.toLine);
+      if (toLineForData !== undefined && finalMainParserOptions.to === undefined) {
+        finalMainParserOptions.to = toLineForData;
+      }
       delete finalMainParserOptions.to_line; delete finalMainParserOptions.toLine;
 
       // If headerMap is provided, ensure columns is true
@@ -631,12 +654,12 @@ export class CSV<T extends Record<string, any>> {
       const dataAfterCsvParse = parseCSV(contentForMainParsing, finalMainParserOptions) as any[];
 
       // Process the data with the shared function (apply header mapping and custom casting)
-      const baseLineNumber = finalMainParserOptions.from_line || 1;
+      const baseLineNumber = normalizeLineNumber(finalMainParserOptions.from_line) ?? 1;
       const parsedData = this.processCSVData<T>(dataAfterCsvParse, options as CSVReadOptions<T & Record<string, any>>, baseLineNumber);
 
       // Basic structural validation
       if (options.validateData && parsedData.length > 0) {
-        const firstDataRowActualLine = finalMainParserOptions.from_line || 1;
+        const firstDataRowActualLine = normalizeLineNumber(finalMainParserOptions.from_line) ?? 1;
         if (finalMainParserOptions.columns !== false) {
           if (!(parsedData[0] && typeof parsedData[0] === 'object')) {
             throw new CSVError(`Expected object rows for validation, but first parsed record (approx. file line ${firstDataRowActualLine}) is not an object.`);
@@ -915,11 +938,11 @@ export class CSV<T extends Record<string, any>> {
   ): CSV<T> {
     try {
       // Set columns: true by default to ensure consistent behavior, then allow user overrides
-      const csvOptions = {
+      const csvOptions: CsvParseOptions<any> = {
         columns: true,
-        ...options.csvOptions
+        ...((options.csvOptions as CsvParseOptions<any> | undefined) || {})
       };
-      let dataAfterCsvParse = parseCSV(csvString, csvOptions) as any[];
+      let dataAfterCsvParse = parseCSV(csvString, csvOptions as CsvParseOptionsType<any>) as any[];
 
       // Process the data with the shared function
       const parsedData = this.processCSVData<T>(dataAfterCsvParse, options);
@@ -975,14 +998,14 @@ export class CSV<T extends Record<string, any>> {
         : { csvOptions: options } as CSVReadOptions<T>;
 
       // Consistent approach: Set columns: true by default for proper object-based parsing
-      const csvParseOptions = {
+      const csvParseOptions: CsvParseOptions<any> = {
         columns: true,
-        ...(readOptions.csvOptions || {})
+        ...((readOptions.csvOptions as CsvParseOptions<any> | undefined) || {})
       };
 
       return new Promise((resolve, reject) => {
         const data: any[] = [];
-        const parser = parseCSVAsync(csvParseOptions);
+        const parser = parseCSVAsync(csvParseOptions as CsvParseOptionsType<any>);
 
         parser.on('readable', () => {
           let record;
@@ -991,7 +1014,7 @@ export class CSV<T extends Record<string, any>> {
           }
         });
 
-        parser.on('error', (err) => {
+        parser.on('error', (err: unknown) => {
           reject(new CSVError('Failed to parse CSV stream', err instanceof Error ? err : new Error(String(err))));
         });
 
@@ -1121,7 +1144,7 @@ export class CSV<T extends Record<string, any>> {
             } else if (arrayRule.targetCsvColumnPrefix) {
               // Find max length of the array in data
               const maxLength = this.data.reduce((max, item) => {
-                const arr = lodashGet(item, key);
+                const arr = getPathValue(item, key);
                 return Array.isArray(arr) ? Math.max(max, arr.length) : max;
               }, 0);
               const limit = arrayRule.maxColumns !== undefined ? Math.min(arrayRule.maxColumns, maxLength) : maxLength;
@@ -1307,7 +1330,7 @@ export class CSV<T extends Record<string, any>> {
               } else if (arrayRule.targetCsvColumnPrefix) {
                 // Find max length of the array in data
                 const maxLength = this.data.reduce((max, item) => {
-                  const arr = lodashGet(item, key);
+                  const arr = getPathValue(item, key);
                   return Array.isArray(arr) ? Math.max(max, arr.length) : max;
                 }, 0);
                 const limit = arrayRule.maxColumns !== undefined ? Math.min(arrayRule.maxColumns, maxLength) : maxLength;
@@ -1589,7 +1612,7 @@ export class CSV<T extends Record<string, any>> {
         } else if (arrayRule.targetCsvColumnPrefix) {
           // Find max length of the array in data
           const maxLength = this.data.reduce((max, item) => {
-            const arr = lodashGet(item, key);
+            const arr = getPathValue(item, key);
             return Array.isArray(arr) ? Math.max(max, arr.length) : max;
           }, 0);
           const limit = arrayRule.maxColumns !== undefined ? Math.min(arrayRule.maxColumns, maxLength) : maxLength;
@@ -3416,12 +3439,13 @@ export class CSV<T extends Record<string, any>> {
       const fileReadStream: fs.ReadStream = fs.createReadStream(resolvedPath, options.fsOptions);
 
       // 1. Prepare options for the main CSV parser (parseCSVAsync)
-      const mainDataParserOptions: CsvParseInternalOptions = options.csvOptions ? { ...options.csvOptions } : {};
+      const mainDataParserOptions: CsvParseInternalOptions<any> = options.csvOptions
+        ? { ...(options.csvOptions as CsvParseOptions<any>) }
+        : {};
 
-      const getCsvFromLineValue = (csvOpts?: CsvParseOptions): number | undefined => {
+      const getCsvFromLineValue = (csvOpts?: CsvParseOptions<any>): number | undefined => {
         if (!csvOpts) return undefined;
-        const fromVal = csvOpts.from ?? csvOpts.from_line ?? csvOpts.fromLine;
-        return typeof fromVal === 'number' && fromVal >= 1 ? fromVal : undefined;
+        return normalizeLineNumber(csvOpts.from ?? csvOpts.from_line ?? csvOpts.fromLine);
       };
       const initialFromForData = getCsvFromLineValue(mainDataParserOptions); // Use options.csvOptions from the CSVReadOptions
 
@@ -3432,11 +3456,14 @@ export class CSV<T extends Record<string, any>> {
       }
       delete mainDataParserOptions.from;
       delete mainDataParserOptions.fromLine;
-      if (mainDataParserOptions.from_line < 1) {
+      const normalizedFromLine = normalizeLineNumber(mainDataParserOptions.from_line);
+      if (normalizedFromLine !== undefined) {
+        mainDataParserOptions.from_line = normalizedFromLine;
+      } else {
         delete mainDataParserOptions.from_line;
       }
 
-      const toLineForData = mainDataParserOptions.to_line ?? mainDataParserOptions.toLine;
+      const toLineForData = normalizeLineNumber(mainDataParserOptions.to_line ?? mainDataParserOptions.toLine);
       if (toLineForData !== undefined && mainDataParserOptions.to === undefined) {
         mainDataParserOptions.to = toLineForData;
       }
@@ -3756,8 +3783,8 @@ export async function* csvGenerator<T extends Record<string, any>>(
   const resolvedPath = path.resolve(filename);
   const csvContent = fs.readFileSync(resolvedPath, 'utf-8');
 
-  const csvOptions = {
-    ...options.csvOptions,
+  const csvOptions: CsvParseOptionsWithColumns<any> = {
+    ...(options.csvOptions as CsvParseOptionsType<any> | undefined),
     columns: true // Ensure we get objects, not arrays
   };
 
@@ -3980,7 +4007,7 @@ export const CSVArrayUtils = {
     field: string
   ): Record<string, T[]> {
     return data.reduce((groups, item) => {
-      const key = String(lodashGet(item, field) || 'undefined');
+      const key = String(getPathValue(item, field) || 'undefined');
       if (!groups[key]) {
         groups[key] = [];
       }
