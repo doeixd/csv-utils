@@ -83,6 +83,11 @@ const processor = CSV.streamFromFile<ProductData>('large_inventory.csv', {
 
 **Note:** `CSV.streamFromFile` initiates processing directly from the data rows. It does not handle preamble (additional header) options like `saveAdditionalHeader` found in `CSV.fromFile`.
 
+Header mapping, custom casts, empty-value checks, and schema validation are
+applied to each streamed row in that order. A schema can filter invalid rows,
+fail the stream, or keep the original mapped and cast row. Streaming does not
+collect per-row validation results; use `fromFileAsync` when those results are needed.
+
 #### Fluent Transformations (`filter`, `map`, `addColumn`)
 
 Once you have a `processor` instance, you can chain transformation methods. Each method returns a *new* `CSVStreamProcessor` instance, preserving immutability.
@@ -150,6 +155,10 @@ try {
 ##### c. Writing to a File (`prepareToFile().run()`)
 
 Stream the processed data directly to an output CSV file.
+
+`prepareToFile` accepts a write `headerMap`. For an array mapping with a
+column prefix, supply `maxColumns` or an explicit header list so the output
+columns can be determined before streaming rows.
 
 ```typescript
 try {

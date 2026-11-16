@@ -19,7 +19,7 @@ The `saveAdditionalHeader` option in `CSVReadOptions` controls how the preamble 
 
 1.  **`saveAdditionalHeader: number` (e.g., `3`)**:
     *   Extracts exactly the specified number of lines from the beginning of the file as the preamble.
-    *   The main CSV data parsing will then start from the line *after* these preamble lines, **unless** `csvOptions.from_line` (or `from` / `fromLine`) is set to an even later line number, in which case `from_line` takes precedence for the data start.
+    *   The main CSV data parsing will then start from the line *after* these preamble lines, **unless** `csvOptions.from_line` (or `fromLine`) is set to an even later line number, in which case `from_line` takes precedence for the data start.
 
     ```typescript
     // Example: Extract first 2 lines as preamble, data starts on line 3
@@ -38,7 +38,7 @@ The `saveAdditionalHeader` option in `CSVReadOptions` controls how the preamble 
     ```
 
 2.  **`saveAdditionalHeader: true`**:
-    *   This mode works in conjunction with `csvOptions.from_line` (or `from` / `fromLine`).
+    *   This mode works in conjunction with `csvOptions.from_line` (or `fromLine`).
     *   If `from_line` is set to a value greater than 1, then `from_line - 1` lines will be extracted as the preamble.
     *   If `from_line` is not set, or is 1, no preamble is extracted with `saveAdditionalHeader: true`.
 

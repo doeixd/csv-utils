@@ -89,7 +89,10 @@ export function tryValidateStandardSchemaSync<S extends StandardSchemaV1>(
 ): StandardSchemaV1.Result<StandardSchemaV1.InferOutput<S>> {
   const validationOutcome = schema['~standard'].validate(input);
 
-  if (validationOutcome instanceof Promise) {
+  if (validationOutcome != null && typeof (validationOutcome as Promise<unknown>).then === 'function') {
+    // The caller receives a synchronous validation error, but the async
+    // validator may still reject later and must not become unhandled.
+    void Promise.resolve(validationOutcome).catch(() => {});
     return {
       issues: [{ message: "Validation is asynchronous but synchronous validation was expected." }]
     } as StandardSchemaV1.FailureResult;
@@ -136,6 +139,8 @@ export interface CSVSchemaConfig<T extends Record<string, any>> {
   
   /** Whether to use async validation (required for async schemas) */
   useAsync?: boolean;
+  /** Maximum number of rows validated concurrently (default: 32). */
+  concurrency?: number;
 }
 
 /**

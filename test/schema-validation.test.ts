@@ -1,5 +1,5 @@
 // tests/validation.test.ts
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi } from 'vite-plus/test';
 import CSV, {
   CSVSchemaConfig,
   StandardSchemaV1,
@@ -85,7 +85,7 @@ const ZodObjectToStandardSchema = <TInputSchema extends z.ZodTypeAny>(
           return { value: result.data };
         }
         return {
-          issues: result.error.errors.map(e => ({
+          issues: result.error.issues.map(e => ({
             message: e.message,
             path: e.path.map(p => (typeof p === 'number' ? { key: p } : p)),
           })),
@@ -313,7 +313,7 @@ describe('CSV Data Validation (with StandardSchemaV1)', () => {
 
     it.skip('should filter with async COLUMN schema in fromFileAsync', async () => {
       const { Readable } = await import('node:stream');
-      vi.mock('node:fs', async () => {
+      vi.doMock('node:fs', async () => {
         const originalFs = await vi.importActual('node:fs') as typeof import('node:fs');
         return { ...originalFs, createReadStream: vi.fn().mockImplementation(() => {
           const stream = new Readable();

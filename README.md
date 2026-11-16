@@ -74,7 +74,7 @@ A TypeScript library for CSV manipulation, featuring robust error handling, stro
 - **🧠 Smart Custom Type Casting** - Define custom logic to test and parse string values into specific types (numbers, dates, booleans, custom objects) on a global or per-column basis.
 - **🔄 High-Performance Streaming API** - `CSVStreamProcessor` for processing massive CSV files with minimal memory footprint, featuring a fluent API.
 - **🔍 Schema Validation** - Integrated support for data validation against `StandardSchemaV1` (compatible with Zod and other validation libraries), with modes for erroring, filtering, or keeping invalid data.
-- **⚖️ Memory Efficiency** - Stream processing utilizes a fixed-size circular buffer with automatic backpressure to manage memory usage effectively for very large datasets.
+- **⚖️ Memory Efficiency** - Stream processing uses Node.js backpressure to manage memory usage for large datasets.
 - **📦 Batch Processing** - Optimized methods for processing data in configurable batches for improved throughput in async operations.
 - **📦 Standalone Functions** - Alternative functional programming style for all core operations.
 
@@ -87,6 +87,8 @@ yarn add @doeixd/csv-utils
 # or
 pnpm add @doeixd/csv-utils
 ```
+
+The published package supports Node.js 16 and later. For development and release checks, use Node.js 24 LTS (24.11 or later).
 
 ## Quick Start
 For more check out the [dedicated quick start guide](docs/quick-start.md)
@@ -459,6 +461,9 @@ Validate CSV data against predefined schemas.
 #### Using Standard Schema
 
 This library supports `StandardSchemaV1` for defining custom validation logic.
+Column schemas run before the row schema, so row validation receives their
+transformed values. Async validation handles up to 32 rows concurrently by
+default; set `concurrency` on the schema configuration to change the limit.
 
 ```typescript
 import CSV, { StandardSchemaV1, CSVSchemaConfig } from '@doeixd/csv-utils';
@@ -946,7 +951,7 @@ _`options` for read methods are typically `CSVReadOptions<T>`._
 | `transform<R>(transformer)`                             | Transforms each row into a new structure `R`.                            | `CSV<R>`                                        |
 | `removeWhere(condition)`                                | Removes rows matching `condition`.                                       | `CSV<T>`                                        |
 | `append(...rows)`                                       | Adds new `rows` to the dataset.                                          | `CSV<T>`                                        |
-| `mergeWith<E>(other, equalityFn, mergeFn)`              | Merges with another dataset `other` (array or `CSV<E>`).                 | `CSV<T>`                                        |
+| `mergeWith<E>(other, equalityFn, mergeFn)`              | Merges with another dataset `other` (array or `CSV<E>`).                 | `CSV<T \| E>`                                   |
 | `addColumn<NK, NV>(colName, valOrFn)`                   | Adds a new column `colName` of type `NK` with values of type `NV`.       | `CSV<T & Record<NK, NV>>`                     |
 | `removeColumn<K>(colNames)`                             | Removes one or more `colNames`.                                          | `CSV<Omit<T, K>>`                             |
 | `renameColumn<OK, NK>(oldName, newName)`                | Renames `oldName` (type `OK`) to `newName` (type `NK`).                  | `CSV<Omit<T, OK> & Record<NK, T[OK]>>`          |
@@ -981,7 +986,7 @@ _`options` for read methods are typically `CSVReadOptions<T>`._
 | `map<R>(callback)`                           | Creates a new array by applying `callback` to each row.                  | `R[]`              |
 | `mapAsync<R>(callback, options?)`            | Asynchronously creates a new array, with batching.                       | `Promise<R[]>`     |
 | `reduce<R>(callback, initialValue)`          | Reduces rows to a single value.                                          | `R`                |
-| `reduceAsync<R>(callback, initialValue, options?)` | Asynchronously reduces rows, with optimized batching/parallel strategies. | `Promise<R>`       |
+| `reduceAsync<R>(callback, initialValue, options?)` | Asynchronously reduces rows in order. | `Promise<R>`       |
 
 ### Utility Objects
 
@@ -1028,7 +1033,7 @@ Custom error class for all library-specific errors.
 
 #### Options Interfaces
 
--   **`CSVReadOptions<T>`**: Configures CSV reading operations.
+-   **`CSVReadOptions<T>`**: Configures CSV reading operations. Readers recognize a UTF-8 BOM by default; pass `csvOptions: { bom: false }` to retain it.
     -   `fsOptions?`: NodeJS file system options.
     -   `csvOptions?`: Options for `csv-parse` (e.g., `delimiter`, `quote`, `skip_empty_lines`). Default: `{ columns: true }`.
     -   `transform?: (content: string) => string`: Pre-parsing transform for raw file content.
@@ -1045,10 +1050,10 @@ Custom error class for all library-specific errors.
 
 -   **`CSVWriteOptions<T>`**: Configures CSV writing operations.
     -   `additionalHeader?: string`: String to prepend to the CSV output (e.g., comments, metadata).
-    -   `stringifyOptions?`: Options for `csv-stringify` (e.g., `header`, `delimiter`, `quoted`). Default: `{ header: true }`.
-    -   `streaming?: boolean`: Whether to use streaming for writing large datasets.
+    -   `stringifyOptions?`: Options for `csv-stringify` (e.g., `header`, `delimiter`, `quoted`). Default: `{ header: true }`. Set `header` to an array to select and order columns without writing a header row.
+    -   `streaming?: boolean`: Deprecated. Synchronous writes always finish before returning; use `writeToFileAsync` for streaming.
     -   `headerMap?: HeaderMap<T>`: Configuration for mapping object properties to CSV columns.
-    -   `streamingThreshold?: number`: Row count threshold to enable streaming (default: 1000).
+    -   `streamingThreshold?: number`: Deprecated; ignored by synchronous writes.
     -   `retry?: RetryOptions`: Configuration for retrying failed write operations.
 
 -   **`CSVStreamOptions<T>`**: Configures generator-based stream processing.
@@ -1108,7 +1113,7 @@ const processor = CSV.streamFromFile<OrderData>('very_large_orders.csv', {
   headerMap: { 'Order ID': 'id', 'Customer Name': 'customer' /* ... */ }
 });
 ```
-**Note on Preamble:** `CSV.streamFromFile` does **not** handle `saveAdditionalHeader` or `additionalHeaderParseOptions` from `CSVReadOptions`. It starts processing directly from the data rows as configured by `csvOptions.from_line` (or line 1 if not set).
+**Note on Preamble:** `CSV.streamFromFile` does **not** handle `saveAdditionalHeader` or `additionalHeaderParseOptions` from `CSVReadOptions`. It starts processing directly from the data rows as configured by `csvOptions.from_line` (or line 1 if not set). Header maps, custom casts, empty-value checks, and schemas run per row; validation results are not retained by the stream processor.
 
 ### Fluent Stream Transformations
 Chain operations like `filter`, `map`, `addColumn` just like the main `CSV` class. Each returns a new `CSVStreamProcessor` instance.
@@ -1289,7 +1294,7 @@ By being aware of this mutability characteristic and following these best practi
     -   **Solution**:
         -   For reading/transforming: Use `CSV.streamFromFile()` to get a `CSVStreamProcessor` and process data via `for await...of` or `prepareForEach().run()`.
         -   For reading only (less transformation): Use `csvGenerator()` or `csvBatchGenerator()`.
-        -   For writing: `CSV.writeToFile()` uses streaming for large datasets by default (`streamingThreshold`). `CSV.writeToFileAsync()` and `writeCSVFromGenerator()` are also good options.
+        -   For writing: Use `CSV.writeToFileAsync()` to stream the CSV instance's rows to disk. `writeCSVFromGenerator()` collects its input before writing.
         -   For CPU-bound tasks on arrays of data: `CSVUtils.processInParallel()`.
 
 -   **Header Mapping Not Working as Expected**:

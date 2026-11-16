@@ -9,9 +9,9 @@ import path from 'node:path';
 import { parse as parseCSV, stringify as stringifyCSV } from 'csv/sync';
 import { parse as parseCSVAsync, stringify as stringifyCSVAsync } from 'csv';
 import { distance as levenshteinDistance } from 'fastest-levenshtein';
-import { getPathValue } from './path-utils';
+import { getPathValue, setPathValueCopy } from './path-utils';
 import type { Options as CsvParseOptionsType } from 'csv-parse';
-import { createHeaderMapFns, HeaderMap, RetryOptions, ObjectArrayToCsvConfig } from './headers'
+import { createHeaderMapFns, objArrayToArray as mapObjectsToRows, HeaderMap, RetryOptions, ObjectArrayToCsvConfig } from './headers'
 import { tryValidateStandardSchemaSync, tryValidateStandardSchemaAsync, CSVSchemaConfig, RowValidationResult } from './schema'
 import { Readable, Transform, Writable, pipeline as streamPipeline } from 'node:stream';
 import { type Transform as NodeTransform } from 'node:stream'
@@ -22,6 +22,70 @@ import os from 'node:os';
 export * from './headers'
 export * from './schema'
 export * from './standalone'
+
+/** Fields in a default join can be absent for unmatched rows; right values win on matches. */
+export type JoinedRow<L, R> = Partial<Omit<L, keyof R>> & {
+  [K in keyof R]?: K extends keyof L ? L[K] | R[K] : R[K]
+};
+
+export type ColumnUpdate<T, K extends string, V> = K extends unknown ? string extends K
+  ? { [P in keyof T]: T[P] | V } & Record<string, unknown>
+  : Omit<T, K> & Record<K, V> : never;
+export type ColumnCastTarget = 'string' | 'number' | 'boolean' | 'date';
+export type ColumnCastValue<C extends ColumnCastTarget> = C extends 'string' ? string
+  : C extends 'number' ? number | null : C extends 'boolean' ? boolean | null : Date | null;
+export type CastColumn<T, K extends string, C extends ColumnCastTarget> = K extends unknown ? {
+  [P in keyof T]: string extends K ? T[P] | ColumnCastValue<C> : P extends K ? ColumnCastValue<C> : T[P]
+} : never;
+export type RenamedColumn<T, Old extends string, New extends string> = Old extends unknown ? New extends unknown ? string extends Old
+  ? Partial<T> & Partial<Record<New, unknown>>
+  : Old extends New ? T
+  : Old extends keyof T ? Omit<T, Old | New> & ({} extends Pick<T, Old>
+      ? Partial<Record<New, T[Old] | (New extends keyof T ? T[New] : never)>>
+      : Record<New, T[Old]>)
+  : Omit<T, New> & Partial<Record<New, unknown>> : never : never;
+export type FilledColumn<T, K extends keyof T, V> = K extends unknown
+  ? Omit<T, K> & { [P in K]-?: Exclude<T[P], null | undefined> | V }
+  : never;
+type WidenString<V> = V extends string ? string : V;
+export type TextColumns<T> = { [P in keyof T]: WidenString<T[P]> };
+export type TextColumn<T, K extends keyof T> = K extends unknown
+  ? { [P in keyof T]: P extends K ? WidenString<T[P]> : T[P] }
+  : never;
+
+function positiveInteger(value: number | undefined, fallback: number, name: string): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value <= 0) throw new CSVError(`${name} must be a positive integer`);
+  return value;
+}
+
+// Writing maps object paths to CSV headers. Keep directional rules separate
+// so a CSV header cannot overwrite an array or function rule with the same key.
+function createWriteHeaderMapFns<T>(headerMap: HeaderMap<T>) {
+  const rules: HeaderMap<T> = {};
+  const paths = new Map<string, string>();
+  for (const [path, rule] of Object.entries(headerMap)) {
+    if (typeof rule === 'string') {
+      paths.set(rule, path);
+    } else {
+      rules[path] = rule;
+    }
+  }
+  const mapper = Object.keys(rules).length ? createHeaderMapFns<T>(rules) : undefined;
+  if (!mapper && !paths.size) createHeaderMapFns<T>(headerMap);
+  return {
+    toRowArr(item: T, headers: string[]) {
+      const row = mapper ? mapper.toRowArr(item, headers) : headers.map(() => '');
+      return headers.map((header, index) => {
+        const path = paths.get(header);
+        if (path === undefined) return row[index] ?? '';
+        const value = getPathValue(item, path);
+        if (value === undefined || value === null) return '';
+        return typeof value === 'object' && !Array.isArray(value) ? JSON.stringify(value) : value;
+      });
+    }
+  };
+}
 
 /**
  * Options for creating a CSV instance from pre-existing data.
@@ -57,10 +121,6 @@ export class CSVError extends Error {
 
 export type CsvParseOptions<T = string[]> = CsvParseOptionsType<T>;
 type CsvParseInternalOptions<T = string[]> = CsvParseOptionsType<T>;
-type CsvParseOptionsWithColumns<T> = Omit<CsvParseOptionsType<T>, 'columns'> & {
-  columns: Exclude<CsvParseOptionsType<T>['columns'], undefined | false>;
-};
-
 const normalizeLineNumber = (value: string | number | null | undefined): number | undefined => {
   if (value === null || value === undefined) {
     return undefined;
@@ -74,8 +134,32 @@ const normalizeLineNumber = (value: string | number | null | undefined): number 
   return numeric >= 1 ? numeric : undefined;
 };
 
+export type CSVWriteStringifyOptions = Omit<NonNullable<Parameters<typeof stringifyCSV>[1]>, 'header'> & {
+  /** An array selects and orders columns without emitting a header row. */
+  header?: boolean | string[];
+};
+
+function normalizeWriteStringifyOptions(options: CSVWriteStringifyOptions): NonNullable<Parameters<typeof stringifyCSV>[1]> {
+  return Array.isArray(options.header)
+    ? { ...options, columns: options.header, header: false }
+    : { ...options, header: options.header };
+}
+
+function prependCSVHeader(header: string, content: string): string {
+  if (!header || !content.startsWith('\uFEFF')) return header + content;
+  return (header.startsWith('\uFEFF') ? header : `\uFEFF${header}`) + content.slice(1);
+}
+
+function prepareStreamingHeader(header: string, options: CSVWriteStringifyOptions) {
+  if (!header || !options.bom) return { header, options };
+  return {
+    header: header.startsWith('\uFEFF') ? header : `\uFEFF${header}`,
+    options: { ...options, bom: false },
+  };
+}
+
 export type CsvStringifyOptions<T = any> = Parameters<typeof stringifyCSV>[1] | {
-  stringifyOptions?: Parameters<typeof stringifyCSV>[1];
+  stringifyOptions?: CSVWriteStringifyOptions;
   headerMap?: HeaderMap<T>;
 };
 
@@ -185,10 +269,10 @@ export interface CSVReadOptions<T extends Record<string, any>> {
    * These lines are stored in `csvInstance.additionalHeader`.
    *
    * - If `number > 0`: Specifies the exact number of lines to extract as the preamble.
-   *   Data parsing will start after these lines, unless `csvOptions.from_line` (or `from`)
+   *   Data parsing will start after these lines, unless `csvOptions.from_line` (or `fromLine`)
    *   is set and points to an even later line.
    *
-   * - If `true`: Enables preamble extraction *if* `csvOptions.from_line` (or `from`)
+   * - If `true`: Enables preamble extraction *if* `csvOptions.from_line` (or `fromLine`)
    *   is set to a value greater than 1. The preamble will consist of `csvOptions.from_line - 1` lines.
    *   If `csvOptions.from_line` is not set or is 1, no preamble is extracted with `true`.
    *
@@ -243,12 +327,12 @@ export interface CSVWriteOptions<T = any> {
   /** Additional header content to prepend to the CSV */
   additionalHeader?: string;
   /** Options for stringifying the CSV */
-  stringifyOptions?: Parameters<typeof stringifyCSV>[1];
-  /** Whether to use streaming for large files */
+  stringifyOptions?: CSVWriteStringifyOptions;
+  /** @deprecated Synchronous writes always complete before returning; use writeToFileAsync for streaming. */
   streaming?: boolean;
   /** Optional header mapping configuration */
   headerMap?: HeaderMap<T>;
-  /** Threshold for using streaming (number of rows) */
+  /** @deprecated Synchronous writes do not use a streaming threshold. */
   streamingThreshold?: number;
   /** Options for retrying failed operations */
   retry?: RetryOptions;
@@ -393,57 +477,39 @@ export class CSV<T extends Record<string, any>> {
         valid: true
       };
 
-      // Validate row using row schema if provided
-      if (rowSchema) {
-        const rowValidation = tryValidateStandardSchemaSync(rowSchema, row);
-        if (rowValidation.issues) {
-          result.valid = false;
-          result.rowIssues = [...rowValidation.issues];
-        } else {
-          result.validatedRow = rowValidation.value as T;
-        }
-      } else {
-        // If no row schema, original row is the validated row
-        result.validatedRow = row as T;
-      }
-
-      // Validate individual columns if provided
+      const workingRow = { ...row };
       if (columnSchemas) {
-        result.columnIssues = {};
-
+        const issues: Record<string, import('./schema').StandardSchemaV1.Issue[]> = {};
         for (const [column, schema] of Object.entries(columnSchemas)) {
           if (!schema) continue;
-
-          const columnValidation = tryValidateStandardSchemaSync(schema, row[column]);
-          if (columnValidation.issues) {
+          const validation = tryValidateStandardSchemaSync(schema, row[column]);
+          if (validation.issues) {
             result.valid = false;
-            if (!result.columnIssues) result.columnIssues = {};
-            result.columnIssues[column] = [...columnValidation.issues];
-
-            // If column validation failed but provided a corrected value, use it
-            if (result.validatedRow && 'value' in columnValidation) {
-              (result.validatedRow as any)[column] = columnValidation.value;
-            }
-          } else if (result.validatedRow) {
-            // Update the validated value in the result
-            (result.validatedRow as any)[column] = columnValidation.value;
+            Object.defineProperty(issues, column, { value: [...validation.issues], enumerable: true, configurable: true, writable: true });
+          } else {
+            Object.defineProperty(workingRow, column, { value: validation.value, enumerable: true, configurable: true, writable: true });
           }
         }
-
-        // If no column issues, remove the empty object
-        if (result.columnIssues && Object.keys(result.columnIssues).length === 0) {
-          delete result.columnIssues;
+        if (Object.keys(issues).length) result.columnIssues = issues;
+      }
+      if (rowSchema) {
+        const validation = tryValidateStandardSchemaSync(rowSchema, workingRow);
+        if (validation.issues) {
+          result.valid = false;
+          result.rowIssues = [...validation.issues];
+        } else {
+          result.validatedRow = { ...validation.value } as T;
         }
+      } else {
+        result.validatedRow = workingRow as T;
       }
 
       return result;
     };
 
-    // Process each row synchronously
-    const results = data.map(validateRowSync);
-
-    // Process validation results
-    for (const result of results) {
+    // Validate lazily so error mode stops at the first invalid row.
+    for (const row of data) {
+      const result = validateRowSync(row, 0);
       validationResults.push(result);
 
       if (result.valid && result.validatedRow) {
@@ -473,24 +539,6 @@ export class CSV<T extends Record<string, any>> {
     }
 
     return [validatedData, validationResults];
-  }
-
-  /**
-   * For backward compatibility - redirects to the appropriate sync or async validation method
-   * @private
-   */
-  private static _validateWithSchema<T extends Record<string, any>>(
-    data: Record<string, any>[],
-    schemaConfig: CSVSchemaConfig<T>,
-    baseLineNumber: number = 1
-  ): [T[], RowValidationResult<T>[]] {
-    // For backward compatibility, if useAsync is true, we'll still return empty results
-    // as this was the previous behavior. The async method will need to be called afterward.
-    if (schemaConfig.useAsync) {
-      return [[], []];
-    } else {
-      return this._validateWithSchemaSync(data, schemaConfig, baseLineNumber);
-    }
   }
 
   /**
@@ -556,7 +604,7 @@ export class CSV<T extends Record<string, any>> {
 
       const getCsvFromLineValue = (csvOpts?: CsvParseOptions<any>): number | undefined => {
         if (!csvOpts) return undefined;
-        return normalizeLineNumber(csvOpts.from ?? csvOpts.from_line ?? csvOpts.fromLine);
+        return normalizeLineNumber(csvOpts.from_line ?? csvOpts.fromLine);
       };
 
       let numPreambleLinesToExtract: number | undefined = undefined;
@@ -570,7 +618,7 @@ export class CSV<T extends Record<string, any>> {
 
       if (numPreambleLinesToExtract && numPreambleLinesToExtract > 0) {
         const basePreambleOpts: CsvParseInternalOptions = options.additionalHeaderParseOptions
-          ? { ...options.additionalHeaderParseOptions } : {};
+          ? { bom: true, ...options.additionalHeaderParseOptions } : {};
         if (!options.additionalHeaderParseOptions && options.csvOptions) {
           const RELEVANT_LOW_LEVEL_KEYS: (keyof CsvParseInternalOptions)[] = ['delimiter', 'quote', 'escape', 'record_delimiter', 'recordDelimiter', 'ltrim', 'rtrim', 'trim', 'bom'];
           RELEVANT_LOW_LEVEL_KEYS.forEach(key => {
@@ -583,7 +631,7 @@ export class CSV<T extends Record<string, any>> {
           });
         }
         const finaladditionalHeaderParseOptions: CsvParseInternalOptions = { /* ... as before ... */
-          ...basePreambleOpts, columns: false, to: numPreambleLinesToExtract,
+          bom: true, ...basePreambleOpts, columns: false, to: numPreambleLinesToExtract,
           from: undefined, from_line: undefined, fromLine: undefined, to_line: undefined, toLine: undefined,
           skip_empty_lines: undefined, skipEmptyLines: undefined, skip_records_with_error: undefined, skipRecordsWithError: undefined,
           skip_records_with_empty_values: undefined, skipRecordsWithEmptyValues: undefined, comment: undefined,
@@ -606,11 +654,12 @@ export class CSV<T extends Record<string, any>> {
         }
       }
 
-      const contentForMainParsing = options.transform ? options.transform(rawFullContent.trim()) : rawFullContent.trim();
+      const contentForMainParsing = options.transform ? options.transform(rawFullContent) : rawFullContent;
       // Explicitly set columns: true as the default, then spread user options for clarity and consistency
       // This ensures the desired default behavior while still allowing user overrides if needed
       const finalMainParserOptions: CsvParseInternalOptions<any> = {
         columns: true,
+        bom: true,
         ...((options.csvOptions as CsvParseOptions<any> | undefined) || {})
       };
 
@@ -621,7 +670,7 @@ export class CSV<T extends Record<string, any>> {
 
       const fromLineForData = getCsvFromLineValue(options.csvOptions);
       if (fromLineForData !== undefined) { finalMainParserOptions.from_line = fromLineForData; }
-      delete finalMainParserOptions.from; delete finalMainParserOptions.fromLine;
+      delete finalMainParserOptions.fromLine;
 
       if (numPreambleLinesToExtract && numPreambleLinesToExtract > 0) {
         const startDataAfterPreamble = numPreambleLinesToExtract + 1;
@@ -639,16 +688,9 @@ export class CSV<T extends Record<string, any>> {
       }
 
       const toLineForData = normalizeLineNumber(finalMainParserOptions.to_line ?? finalMainParserOptions.toLine);
-      if (toLineForData !== undefined && finalMainParserOptions.to === undefined) {
-        finalMainParserOptions.to = toLineForData;
-      }
-      delete finalMainParserOptions.to_line; delete finalMainParserOptions.toLine;
-
-      // If headerMap is provided, ensure columns is true
-      if (options.headerMap) {
-        finalMainParserOptions.columns = true; // headerMap requires objects from csv-parse
-      }
-      // We've already set columns: true as default in finalMainParserOptions
+      if (toLineForData !== undefined) finalMainParserOptions.to_line = toLineForData;
+      else delete finalMainParserOptions.to_line;
+      delete finalMainParserOptions.toLine;
 
       // Initial parsing of the data
       const dataAfterCsvParse = parseCSV(contentForMainParsing, finalMainParserOptions) as any[];
@@ -732,12 +774,15 @@ export class CSV<T extends Record<string, any>> {
    * @returns A new CSV instance.
    * @throws {CSVError} If schema validation is mode 'error' and fails, or if an async schema is used incorrectly.
    */
+  static fromData<T extends Record<string, any>>(data: T[], options?: CSVFromDataOptions<T>): CSV<T>;
+  static fromData<T extends Record<string, any>>(data: Record<string, any>[], options: CSVFromDataOptions<T> & { schema: CSVSchemaConfig<T> }): CSV<T>;
   static fromData<T extends Record<string, any>>(
     data: (T |Record<string, any>)[], // Input can be Record<string, any> to allow for validation to type T
     options?: CSVFromDataOptions<T>
   ): CSV<T> {
     // Create a new array with copies of the input objects to ensure immutability of the input `data` array
-    let processedData: Record<string, any>[] = Array.isArray(data) ? data.map(row => ({ ...row })) : [];
+    if (!Array.isArray(data)) throw new CSVError('Data must be an array');
+    let processedData: Record<string, any>[] = data.map(row => ({ ...row }));
     let finalAdditionalHeader: string | undefined = undefined; // Not applicable for fromData
     let validationResults: RowValidationResult<T>[] | undefined = undefined;
 
@@ -827,87 +872,102 @@ export class CSV<T extends Record<string, any>> {
       // Only apply custom casting to object-based rows
       if (typeof processedData[0] === 'object' && processedData[0] !== null) {
         processedData = processedData.map((row: Record<string, any>, rowIndex: number) => {
-          const newRow = { ...row };
+          let newRow = { ...row };
 
-          for (const columnName in row) {
-            if (Object.prototype.hasOwnProperty.call(row, columnName)) {
-              const originalValue = row[columnName];
-
-              // Prepare string input for custom casters
-              let valueToTestAndParse: string;
-              if (typeof originalValue === 'string') {
-                valueToTestAndParse = originalValue;
-              } else if (originalValue === null) {
-                valueToTestAndParse = 'null';
-              } else if (originalValue === undefined) {
-                valueToTestAndParse = 'undefined';
-              } else {
-                valueToTestAndParse = String(originalValue);
-              }
-
-              // Build casting context
-              const context: CastingContext = {
-                column: columnName,
-                header: false,
-                index: Object.keys(row).indexOf(columnName),
-                lines: baseLineNumber + rowIndex,
-                records: rowIndex,
-                empty_lines: 0,
-                invalid_field_length: 0,
-                quoting: false
-              };
-
-              let castedValue: any = originalValue; // Default to original value
-
-              // Function to apply a caster
-              const applyCaster = (caster: Caster<any>): boolean => {
-                if (caster.test(valueToTestAndParse, context)) {
-                  try {
-                    castedValue = caster.parse(valueToTestAndParse, context);
-                    return true; // Caster applied successfully
-                  } catch (e) {
-                    if (onCastError === 'error') {
-                      throw new CSVError(
-                        `Custom cast failed for column "${columnName}" at line ${context.lines}, value: "${valueToTestAndParse}". Error: ${(e as Error).message}`,
-                        e
-                      );
-                    } else if (onCastError === 'null') {
-                      castedValue = null;
-                    } else { // 'original'
-                      castedValue = originalValue;
-                    }
-                    return true; // Caster was attempted but failed/handled
-                  }
-                }
-                return false; // Caster test failed
-              };
-
-              // 1. Try column-specific casters first
-              if (columnCasts && columnCasts[columnName as string]) {
-                const columnRule = columnCasts[columnName as string];
-                const rulesToTry = Array.isArray(columnRule) ? columnRule : [columnRule];
-
-                for (const rule of rulesToTry) {
-                  let casterToUse: Caster<any> | undefined;
-
-                  if (typeof rule === 'string' && definitions && definitions[rule as keyof CustomCastDefinition]) {
-                    casterToUse = definitions[rule as keyof CustomCastDefinition];
-                  } else if (typeof rule === 'object' && rule !== null && 'test' in rule && 'parse' in rule) {
-                    casterToUse = rule as Caster<any>;
-                  }
-
-                  if (casterToUse && applyCaster(casterToUse)) {
-                    break; // First successful caster wins
-                  }
-                }
-              }
-
-              // 2. Global casters are not automatically applied - only column-specific casters are used
-              // This prevents unexpected type conversions on columns that weren't explicitly configured
-
-              // Set the potentially modified value in the new row
-              newRow[columnName] = castedValue;
+          const rowKeys = Object.keys(row);
+          const castPaths = Object.keys(columnCasts ?? {});
+          const positions = castPaths.length > 8 ? new Map(rowKeys.map((name, index) => [name, index])) : undefined;
+          const directColumns: Array<{ name: string; index: number; direct: boolean }> = [];
+          const nestedColumns: typeof directColumns = [];
+          for (const path of castPaths) {
+            if (Object.prototype.hasOwnProperty.call(row, path)) {
+              const index = positions ? positions.get(path) ?? -1 : rowKeys.indexOf(path);
+              if (index >= 0 && columnCasts![path]) directColumns.push({ name: path, index, direct: true });
+            } else if (getPathValue(row, path) !== undefined) {
+              nestedColumns.push({ name: path, index: -1, direct: false });
             }
+          }
+          directColumns.sort((a, b) => a.index - b.index);
+          const columns = directColumns.concat(nestedColumns);
+
+          for (const { name: columnName, index: columnIndex, direct: directColumn } of columns) {
+            const originalValue = directColumn ? row[columnName] : getPathValue(row, columnName);
+
+            // Prepare string input for custom casters
+            let valueToTestAndParse: string;
+            if (typeof originalValue === 'string') {
+              valueToTestAndParse = originalValue;
+            } else if (originalValue === null) {
+              valueToTestAndParse = 'null';
+            } else if (originalValue === undefined) {
+              valueToTestAndParse = 'undefined';
+            } else {
+              valueToTestAndParse = String(originalValue);
+            }
+
+            // Build casting context
+            const context: CastingContext = {
+              column: columnName,
+              header: false,
+              index: columnIndex,
+              lines: baseLineNumber + rowIndex,
+              records: rowIndex,
+              empty_lines: 0,
+              invalid_field_length: 0,
+              quoting: false
+            };
+
+            let castedValue: any = originalValue; // Default to original value
+
+            // Function to apply a caster
+            const applyCaster = (caster: Caster<any>): boolean => {
+              if (caster.test(valueToTestAndParse, context)) {
+                try {
+                  castedValue = caster.parse(valueToTestAndParse, context);
+                  return true; // Caster applied successfully
+                } catch (e) {
+                  if (onCastError === 'error') {
+                    throw new CSVError(
+                      `Custom cast failed for column "${columnName}" at line ${context.lines}, value: "${valueToTestAndParse}". Error: ${(e as Error).message}`,
+                      e
+                    );
+                  } else if (onCastError === 'null') {
+                    castedValue = null;
+                  } else { // 'original'
+                    castedValue = originalValue;
+                  }
+                  return true; // Caster was attempted but failed/handled
+                }
+              }
+              return false; // Caster test failed
+            };
+
+            // 1. Try column-specific casters first
+            if (columnCasts && Object.prototype.hasOwnProperty.call(columnCasts, columnName) && columnCasts[columnName as string]) {
+              const columnRule = columnCasts[columnName as string];
+              const rulesToTry = Array.isArray(columnRule) ? columnRule : [columnRule];
+
+              for (const rule of rulesToTry) {
+                let casterToUse: Caster<any> | undefined;
+
+                if (typeof rule === 'string' && definitions && definitions[rule as keyof CustomCastDefinition]) {
+                  casterToUse = definitions[rule as keyof CustomCastDefinition];
+                } else if (typeof rule === 'object' && rule !== null && 'test' in rule && 'parse' in rule) {
+                  casterToUse = rule as Caster<any>;
+                }
+
+                if (casterToUse && applyCaster(casterToUse)) {
+                  break; // First successful caster wins
+                }
+              }
+            }
+
+            // 2. Global casters are not automatically applied - only column-specific casters are used
+            // This prevents unexpected type conversions on columns that weren't explicitly configured
+
+            // Set the potentially modified value in the new row
+            if (directColumn) newRow[columnName] = castedValue;
+            else newRow = setPathValueCopy(newRow, columnName, castedValue);
           }
 
           return newRow as T;
@@ -940,6 +1000,7 @@ export class CSV<T extends Record<string, any>> {
       // Set columns: true by default to ensure consistent behavior, then allow user overrides
       const csvOptions: CsvParseOptions<any> = {
         columns: true,
+        bom: true,
         ...((options.csvOptions as CsvParseOptions<any> | undefined) || {})
       };
       let dataAfterCsvParse = parseCSV(csvString, csvOptions as CsvParseOptionsType<any>) as any[];
@@ -993,13 +1054,14 @@ export class CSV<T extends Record<string, any>> {
   ): Promise<CSV<T>> {
     try {
       // Handle the case where options is just simple options
-      const readOptions: CSVReadOptions<T> = 'csvOptions' in options
-        ? options as CSVReadOptions<T>
-        : { csvOptions: options } as CSVReadOptions<T>;
+      const readOptions: CSVReadOptions<T> = Object.keys(options).every(key => key === 'columns')
+        ? { csvOptions: options } as CSVReadOptions<T>
+        : options as CSVReadOptions<T>;
 
       // Consistent approach: Set columns: true by default for proper object-based parsing
       const csvParseOptions: CsvParseOptions<any> = {
         columns: true,
+        bom: true,
         ...((readOptions.csvOptions as CsvParseOptions<any> | undefined) || {})
       };
 
@@ -1018,7 +1080,9 @@ export class CSV<T extends Record<string, any>> {
           reject(new CSVError('Failed to parse CSV stream', err instanceof Error ? err : new Error(String(err))));
         });
 
-        parser.on('end', () => {
+        stream.on('error', (err: Error) => parser.destroy(err));
+
+        parser.on('end', async () => {
           try {
             // Process the data with the shared function (apply header mapping and custom casting)
             const processedData = this.processCSVData<T>(data, readOptions as CSVReadOptions<T & Record<string, any>>);
@@ -1026,10 +1090,9 @@ export class CSV<T extends Record<string, any>> {
             // Apply schema validation if configured
             if (readOptions.schema && processedData.length > 0) {
               try {
-                const [validatedData, validationResults] = this._validateWithSchema(
-                  processedData,
-                  readOptions.schema
-                );
+                const [validatedData, validationResults] = readOptions.schema.useAsync !== false
+                  ? await this._validateWithSchemaAsync(processedData, readOptions.schema)
+                  : this._validateWithSchemaSync(processedData, readOptions.schema);
 
                 // Return validated data and include validation results
                 resolve(new CSV<T>(validatedData, undefined, validationResults));
@@ -1115,11 +1178,8 @@ export class CSV<T extends Record<string, any>> {
    *   }
    * });
    * 
-   * // With streaming for large files
-   * users.writeToFile('users_export.csv', { 
-   *   streaming: true,
-   *   streamingThreshold: 500 // Default is 1000
-   * });
+   * // Use the asynchronous writer for streaming output.
+   * await users.writeToFileAsync('users_export.csv');
    * ```
    */
   writeToFile(filename: string, options: CSVWriteOptions<T> = {}): void {
@@ -1127,8 +1187,6 @@ export class CSV<T extends Record<string, any>> {
       const outputPath = filename.endsWith('.csv')
         ? filename
         : `${filename}.csv`;
-
-      const streamingThreshold = options.streamingThreshold || 1000;
 
       // Apply header mapping if provided
       if (options.headerMap) {
@@ -1160,116 +1218,21 @@ export class CSV<T extends Record<string, any>> {
           ? stringifyOptions.header
           : generatedHeaders;
 
-        const { toRowArr } = createHeaderMapFns<T>(options.headerMap);
+        const { toRowArr } = createWriteHeaderMapFns<T>(options.headerMap);
 
-        // Handle streaming with header map
-        if (options.streaming && this.data.length > streamingThreshold) {
-          // Use streaming for large datasets with header mapping
-          const headerToPrepend = options.additionalHeader ?? this.additionalHeader ?? '';
-          const writable = fs.createWriteStream(outputPath, { encoding: 'utf-8' });
-
-          if (headerToPrepend) {
-            writable.write(headerToPrepend);
-          }
-
-          // Create transform stream for header mapping
-          const headerMapTransform = new Transform({
-            objectMode: true,
-            transform(chunk, _encoding, callback) {
-              try {
-                const mappedRow = toRowArr(chunk, headers);
-                callback(null, mappedRow);
-              } catch (error) {
-                callback(error as Error);
-              }
-            }
-          });
-
-          // Create stringifier with appropriate options
-          // If header is true, make sure it's handled correctly in stringifyOptions
-          const csvStringifyOptions = {
-            ...stringifyOptions,
-            header: Array.isArray(stringifyOptions.header) ? headers : stringifyOptions.header
-          };
-
-          // Create a transform stream using stringifyCSVAsync 
-          // Use a type assertion to help TypeScript understand this is valid
-          // The CSV module expects options as the first argument
-          // The 'as any' casting is necessary because csvStringifyOptions' structure (with header property that 
-          // could be boolean or string[]) may not perfectly align with stringifyCSVAsync's expected type
-          const stringifier = stringifyCSVAsync(csvStringifyOptions as any) as Transform;
-
-          // Add a simple error handler to the stringifier
-          stringifier.on('error', (err) => {
-            console.error('CSV stringification error:', err);
-          });
-
-          // Create pipeline
-          Readable.from(this.data)
-            .pipe(headerMapTransform)
-            .pipe(stringifier)
-            .pipe(writable);
-
-          return;
-        } else {
-          // Standard in-memory processing for smaller datasets
-          // Transform the data through the header map
-          const rows = this.data.map(item => toRowArr(item, headers));
-
-          // Add headers as the first row if needed
-          if (stringifyOptions.header === true) {
-            rows.unshift(headers);
-          }
-
-          // Use a custom stringifier without the header option since we've manually handled it
-          const csvString = rows.map(row =>
-            row.map(cell => {
-              if (cell === null || cell === undefined) return '';
-              return typeof cell === 'string' && (cell.includes(',') || cell.includes('"') || cell.includes('\n'))
-                ? `"${cell.replace(/"/g, '""')}"`
-                : String(cell);
-            }).join(',')
-          ).join('\n');
-
-          fs.writeFileSync(
-            outputPath,
-            (options.additionalHeader ?? this.additionalHeader ?? '') + csvString,
-            'utf-8'
-          );
-          return;
-        }
+        const rows = this.data.map(item => toRowArr(item, headers));
+        if (stringifyOptions.header === true) rows.unshift(headers);
+        const csvString = stringifyCSV(rows, {
+          ...stringifyOptions, header: false, columns: undefined, eof: stringifyOptions.eof ?? false,
+        });
+        fs.writeFileSync(outputPath, prependCSVHeader(options.additionalHeader ?? this.additionalHeader ?? '', csvString), 'utf-8');
+        return;
       }
 
-      // Standard CSV writing without header mapping
-      if (options.streaming && this.data.length > streamingThreshold) {
-        // Use streaming for large datasets
-        // Use a type assertion to help TypeScript understand this is valid
-        const stringifier = stringifyCSVAsync(
-          options.stringifyOptions || { header: true }
-        ) as Transform;
+      // This API is synchronous even when the legacy streaming option is set.
+      const csvString = stringifyCSV(this.data, normalizeWriteStringifyOptions(options.stringifyOptions || { header: true }));
+      fs.writeFileSync(outputPath, prependCSVHeader(options.additionalHeader ?? this.additionalHeader ?? '', csvString), 'utf-8');
 
-        const readable = Readable.from(this.data);
-        const writable = fs.createWriteStream(outputPath, { encoding: 'utf-8' });
-
-        const headerToPrepend = options.additionalHeader ?? this.additionalHeader ?? '';
-        if (headerToPrepend) {
-          writable.write(headerToPrepend);
-        }
-
-        readable.pipe(stringifier).pipe(writable);
-      } else {
-        // Use synchronous version for smaller datasets
-        const csvString = stringifyCSV(
-          this.data,
-          options.stringifyOptions || { header: true }
-        );
-
-        fs.writeFileSync(
-          outputPath,
-          (options.additionalHeader ?? this.additionalHeader ?? '') + csvString,
-          'utf-8'
-        );
-      }
     };
 
     // Use retry logic if configured
@@ -1303,18 +1266,10 @@ export class CSV<T extends Record<string, any>> {
         ? filename
         : `${filename}.csv`;
 
-      return new Promise((resolve, reject) => {
+      return await new Promise((resolve, reject) => {
         const stringifyOptions = options.stringifyOptions || { header: true };
-        const stringifier = stringifyCSVAsync(stringifyOptions);
-        const writable = fs.createWriteStream(outputPath, { encoding: 'utf-8' });
-
-        // Add additional header if present
-        if (options.additionalHeader || this.additionalHeader) {
-          writable.write(options.additionalHeader ?? this.additionalHeader ?? '');
-        }
-
-        writable.on('finish', resolve);
-        writable.on('error', reject);
+        const prepared = prepareStreamingHeader(options.additionalHeader ?? this.additionalHeader ?? '', stringifyOptions);
+        let stringifier: ReturnType<typeof stringifyCSVAsync>;
 
         // Apply header mapping if provided
         if (options.headerMap) {
@@ -1346,7 +1301,8 @@ export class CSV<T extends Record<string, any>> {
             ? stringifyOptions.header
             : generatedHeaders;
 
-          const { toRowArr } = createHeaderMapFns<T>(options.headerMap);
+          const { toRowArr } = createWriteHeaderMapFns<T>(options.headerMap);
+          stringifier = stringifyCSVAsync({ ...prepared.options, header: Array.isArray(stringifyOptions.header) ? false : stringifyOptions.header, columns: headers } as any);
 
           // Create a transform stream that applies the header mapping
           const transformer = new Transform({
@@ -1361,10 +1317,15 @@ export class CSV<T extends Record<string, any>> {
             }
           });
 
-          Readable.from(this.data).pipe(transformer).pipe(stringifier).pipe(writable);
+          const writable = fs.createWriteStream(outputPath, { encoding: 'utf-8' });
+          if (prepared.header) writable.write(prepared.header);
+          streamPipeline(Readable.from(this.data), transformer, stringifier, writable, error => error ? reject(error) : resolve());
         } else {
           // Standard processing without header mapping
-          Readable.from(this.data).pipe(stringifier).pipe(writable);
+          stringifier = stringifyCSVAsync(normalizeWriteStringifyOptions(prepared.options));
+          const writable = fs.createWriteStream(outputPath, { encoding: 'utf-8' });
+          if (prepared.header) writable.write(prepared.header);
+          streamPipeline(Readable.from(this.data), stringifier, writable, error => error ? reject(error) : resolve());
         }
       });
     } catch (error) {
@@ -1404,6 +1365,9 @@ export class CSV<T extends Record<string, any>> {
    * @throws {CSVError} If the schema is configured for async validation
    */
   validate<U extends Record<string, any> = T>(schema: CSVSchemaConfig<U>): CSV<U> {
+    if (schema.useAsync) {
+      throw new CSVError('Asynchronous schema validation is not supported in validate; use validateAsync instead.');
+    }
     if (this.data.length === 0) {
       return new CSV<U>([], this.additionalHeader);
     }
@@ -1494,90 +1458,72 @@ export class CSV<T extends Record<string, any>> {
     // Function to validate a row asynchronously
     const validateRowAsync = async (row: Record<string, any>, _index: number): Promise<RowValidationResult<T>> => {
       const result: RowValidationResult<T> = {
-        originalRow: row,
+        originalRow: { ...row },
         valid: true
       };
 
-      // Validate row using row schema if provided
-      if (rowSchema) {
-        const rowValidation = await tryValidateStandardSchemaAsync(rowSchema, row);
-        if (rowValidation.issues) {
-          result.valid = false;
-          result.rowIssues = [...rowValidation.issues];
-        } else {
-          result.validatedRow = rowValidation.value as T;
-        }
-      } else {
-        // If no row schema, original row is the validated row
-        result.validatedRow = row as T;
-      }
-
-      // Validate individual columns if provided
+      const workingRow = { ...row };
       if (columnSchemas) {
-        result.columnIssues = {};
-
-        // Validate columns in parallel
-        const columnEntries = Object.entries(columnSchemas);
-        await Promise.all(columnEntries.map(async ([column, schema]) => {
+        const issues: Record<string, import('./schema').StandardSchemaV1.Issue[]> = {};
+        await Promise.all(Object.entries(columnSchemas).map(async ([column, schema]) => {
           if (!schema) return;
-
-          const columnValidation = await tryValidateStandardSchemaAsync(schema, row[column]);
-          if (columnValidation.issues) {
+          const validation = await tryValidateStandardSchemaAsync(schema, row[column]);
+          if (validation.issues) {
             result.valid = false;
-            if (!result.columnIssues) result.columnIssues = {};
-            result.columnIssues![column] = [...columnValidation.issues];
-
-            // If column validation failed but provided a corrected value, use it
-            if (result.validatedRow && 'value' in columnValidation) {
-              (result.validatedRow as any)[column] = columnValidation.value;
-            }
-          } else if (result.validatedRow) {
-            // Update the validated value in the result
-            (result.validatedRow as any)[column] = columnValidation.value;
+            Object.defineProperty(issues, column, { value: [...validation.issues], enumerable: true, configurable: true, writable: true });
+          } else {
+            Object.defineProperty(workingRow, column, { value: validation.value, enumerable: true, configurable: true, writable: true });
           }
         }));
-
-        // If no column issues, remove the empty object
-        if (result.columnIssues && Object.keys(result.columnIssues).length === 0) {
-          delete result.columnIssues;
+        if (Object.keys(issues).length) result.columnIssues = issues;
+      }
+      if (rowSchema) {
+        const validation = await tryValidateStandardSchemaAsync(rowSchema, workingRow);
+        if (validation.issues) {
+          result.valid = false;
+          result.rowIssues = [...validation.issues];
+        } else {
+          result.validatedRow = { ...validation.value } as T;
         }
+      } else {
+        result.validatedRow = workingRow as T;
       }
 
       return result;
     };
 
-    // Process all rows asynchronously in parallel
-    const rowValidationPromises = data.map((row, index) => validateRowAsync(row, index));
-    const results = await Promise.all(rowValidationPromises);
+    const concurrency = positiveInteger(schemaConfig.concurrency, 32, 'schema concurrency');
+    for (let start = 0; start < data.length; start += concurrency) {
+      const results = await Promise.all(data.slice(start, start + concurrency).map(validateRowAsync));
+      for (const result of results) {
+        validationResults.push(result);
 
-    // Process validation results
-    for (const result of results) {
-      validationResults.push(result);
+        if (result.valid && result.validatedRow) {
+          validatedData.push(result.validatedRow);
+        } else if (validationMode === 'error') {
+          // Collect all validation issues for better error reporting
+          const issues: string[] = [];
 
-      if (result.valid && result.validatedRow) {
-        validatedData.push(result.validatedRow);
-      } else if (validationMode === 'error') {
-        // Collect all validation issues for better error reporting
-        const issues: string[] = [];
-
-        if (result.rowIssues) {
-          issues.push(`Row validation issues: ${result.rowIssues.map(i => i.message).join(', ')}`);
-        }
-
-        if (result.columnIssues) {
-          for (const [column, columnIssues] of Object.entries(result.columnIssues)) {
-            issues.push(`Column '${column}' validation issues: ${columnIssues.map(i => i.message).join(', ')}`);
+          if (result.rowIssues) {
+            issues.push(`Row validation issues: ${result.rowIssues.map(i => i.message).join(', ')}`);
           }
-        }
 
-        throw new CSVError(`CSV validation failed: ${issues.join('; ')}`);
-      } else if (validationMode === 'filter') {
-        // Skip invalid rows - don't add to validatedData
-        continue;
-      } else if (validationMode === 'keep' && !result.valid) {
-        // Keep even invalid rows in the resulting dataset
-        validatedData.push(result.originalRow as T);
+          if (result.columnIssues) {
+            for (const [column, columnIssues] of Object.entries(result.columnIssues)) {
+              issues.push(`Column '${column}' validation issues: ${columnIssues.map(i => i.message).join(', ')}`);
+            }
+          }
+
+          throw new CSVError(`CSV validation failed: ${issues.join('; ')}`);
+        } else if (validationMode === 'filter') {
+          // Skip invalid rows - don't add to validatedData
+          continue;
+        } else if (validationMode === 'keep' && !result.valid) {
+          // Keep even invalid rows in the resulting dataset
+          validatedData.push(result.originalRow as T);
+        }
       }
+
     }
 
     return [validatedData, validationResults];
@@ -1627,7 +1573,7 @@ export class CSV<T extends Record<string, any>> {
       ? stringifyOptions.header
       : generatedHeaders;
 
-    const { toRowArr } = createHeaderMapFns<T>(headerMap);
+    const { toRowArr } = createWriteHeaderMapFns<T>(headerMap);
 
         // Transform the data through the header map
         const rows = this.data.map(item => toRowArr(item, headers));
@@ -1637,25 +1583,19 @@ export class CSV<T extends Record<string, any>> {
           rows.unshift(headers);
         }
 
-        // Use a custom stringifier without the header option
-        return rows.map(row =>
-          row.map(cell => {
-            if (cell === null || cell === undefined) return '';
-            return typeof cell === 'string' && (cell.includes(',') || cell.includes('"') || cell.includes('\n'))
-              ? `"${cell.replace(/"/g, '""')}"`
-              : String(cell);
-          }).join(',')
-        ).join('\n');
+        return stringifyCSV(rows, {
+          ...stringifyOptions, header: false, columns: undefined, eof: stringifyOptions.eof ?? false,
+        });
       }
 
       // If headerMap is not provided, use standard stringify with stringifyOptions
-      return stringifyCSV(this.data, stringifyOptions);
+      return stringifyCSV(this.data, normalizeWriteStringifyOptions(stringifyOptions));
     }
 
     // Handle standard stringify options (direct options object)
     // Handle case when options has stringifyOptions property
     if (options && 'stringifyOptions' in options) {
-      return stringifyCSV(this.data, options.stringifyOptions || { header: true });
+      return stringifyCSV(this.data, normalizeWriteStringifyOptions(options.stringifyOptions || { header: true }));
     }
   // Handle case when options is a direct stringify options object
   return stringifyCSV(this.data, { header: true, ...(options as Parameters<typeof stringifyCSV>[1] || {}) });
@@ -1675,9 +1615,9 @@ export class CSV<T extends Record<string, any>> {
    * @returns A new object with the CSV structure
    * @throws {CSVError} If the CSV has no rows
    */
-  getBaseRow<R extends { [K in keyof T]?: any } = { [K in keyof T]?: undefined }>(
+  getBaseRow(
     defaults?: Partial<T>
-  ): R {
+  ): Partial<T> {
     if (this.data.length === 0) {
       throw new CSVError('Cannot create base row from empty data');
     }
@@ -1686,7 +1626,7 @@ export class CSV<T extends Record<string, any>> {
       Object.entries(this.data[0]).map(([key]) => [key, undefined])
     ) as { [K in keyof T]: undefined };
 
-    return defaults ? { ...baseRow, ...defaults } as R : baseRow as R;
+    return defaults ? { ...baseRow, ...defaults } as Partial<T> : baseRow as Partial<T>;
   }
 
   /**
@@ -1694,7 +1634,7 @@ export class CSV<T extends Record<string, any>> {
    * @param data - The data to populate the row with
    * @returns A new object with all CSV fields
    */
-  createRow(data: Partial<T> = {}): T {
+  createRow(data: Partial<T> = {}): Partial<T> {
     return { ...this.getBaseRow(), ...data };
   }
 
@@ -1729,11 +1669,10 @@ export class CSV<T extends Record<string, any>> {
    * @returns Array of matches with similarity scores
    */
   findSimilarRows(str: string, column: keyof T): SimilarityMatch<T>[] {
-    return [...this.data]
-      .map(row => ({
-        row,
-        dist: levenshteinDistance(str, String(row[column]))
-      }))
+    return this.data.map(row => ({
+      row,
+      dist: levenshteinDistance(str, String(row[column]))
+    }))
       .sort((a, b) => a.dist - b.dist);
   }
 
@@ -1744,8 +1683,12 @@ export class CSV<T extends Record<string, any>> {
    * @returns The best match or undefined
    */
   findMostSimilarRow(str: string, column: keyof T): SimilarityMatch<T> | undefined {
-    const matches = this.findSimilarRows(str, column);
-    return matches.length > 0 ? matches[0] : undefined;
+    let best: SimilarityMatch<T> | undefined;
+    for (const row of this.data) {
+      const dist = levenshteinDistance(str, String(row[column]));
+      if (!best || dist < best.dist) best = { row, dist };
+    }
+    return best;
   }
 
   /**
@@ -1786,7 +1729,7 @@ export class CSV<T extends Record<string, any>> {
   groupBy(column: keyof T): Record<string, T[]> {
     return this.data.reduce((acc, row) => {
       const key = String(row[column]);
-      if (!acc[key]) acc[key] = [];
+      if (!Object.prototype.hasOwnProperty.call(acc, key)) Object.defineProperty(acc, key, { value: [], enumerable: true, writable: true, configurable: true });
       acc[key].push({ ...row });
       return acc;
     }, {} as Record<string, T[]>);
@@ -1922,8 +1865,7 @@ export class CSV<T extends Record<string, any>> {
    * @param columnOrFn - The column key (keyof T) to sort by, or a custom comparison function
    *                     `(a: T, b: T) => number` compatible with `Array.prototype.sort`.
    *                     If a column key is provided, a default string/number-aware comparison is used.
-   *                     If a custom function is provided AND workers are used, the function's
-   *                     `toString()` representation will be sent to workers (requires `eval`).
+   *                     Custom comparison functions run in the main thread so closures work.
    * @param direction - Sort direction ('asc' or 'desc'). Only applies if `columnOrFn` is a column key.
    *                    Ignored if `columnOrFn` is a custom comparison function.
    * @param options - Optional configuration for asynchronous sorting.
@@ -1942,17 +1884,15 @@ export class CSV<T extends Record<string, any>> {
     }
 
     const workerThreshold = options.workerThreshold ?? CSV.DEFAULT_SORT_WORKER_THRESHOLD;
+    if (!Number.isSafeInteger(workerThreshold) || workerThreshold < 0) throw new CSVError('workerThreshold must be a non-negative integer');
+    const configuredWorkers = options.maxWorkers === undefined
+      ? undefined : positiveInteger(options.maxWorkers, 1, 'maxWorkers');
 
     // Determine the comparison function
     let compareFn: (a: T, b: T) => number;
-    let sortFnStringToWorker: string | undefined = undefined;
 
     if (typeof columnOrFn === 'function') {
       compareFn = columnOrFn;
-      // For workers, we'll try to send the function as a string.
-      // This has limitations (closures, non-serializable context won't work).
-      // And uses eval in the worker, which has security implications.
-      sortFnStringToWorker = columnOrFn.toString();
     } else {
       const column = columnOrFn; // It's a keyof T
       compareFn = (a: T, b: T): number => {
@@ -1973,17 +1913,24 @@ export class CSV<T extends Record<string, any>> {
       };
     }
 
-    // If data size is below threshold or only 1 CPU, sort in the main thread
-    const numCPUs = os.cpus().length;
-    if (this.data.length <= workerThreshold || numCPUs <= 1) {
-      // console.log('Sorting in main thread');
-      const sortedData = [...this.data].sort(compareFn);
-      return new CSV<T>(sortedData, this.additionalHeader, this.validationResults);
+    const sortLocally = () => new CSV<T>([...this.data].sort(compareFn), this.additionalHeader, this.validationResults);
+    if (this.data.length <= workerThreshold || configuredWorkers === 1 || typeof columnOrFn === 'function') {
+      return sortLocally();
     }
+
+    // Only inspect CPUs and keys when a worker sort may actually be used.
+    const numCPUs = os.cpus().length;
+    if (numCPUs <= 1) return sortLocally();
+    const requestedWorkers = configuredWorkers ?? Math.min(numCPUs, 8);
+    const hasNonPrimitiveKeys = typeof columnOrFn !== 'function' && this.data.some(row => {
+      const value = row[columnOrFn];
+      return value !== null && (typeof value === 'object' || typeof value === 'function' || typeof value === 'symbol');
+    });
+    if (hasNonPrimitiveKeys) return sortLocally();
 
     // --- Parallel Sorting with Workers ---
     // console.log('Attempting parallel sort');
-    const maxWorkers = Math.min(options.maxWorkers || numCPUs, numCPUs);
+    const maxWorkers = Math.min(requestedWorkers, numCPUs, this.data.length);
     const chunkSize = Math.ceil(this.data.length / maxWorkers);
     const chunks: T[][] = [];
 
@@ -1995,43 +1942,23 @@ export class CSV<T extends Record<string, any>> {
       return new Promise<T[]>((resolve, reject) => {
         const worker = new Worker(`
   const { parentPort, workerData } = require('worker_threads');
-
-  const { chunk, column, direction, sortFnString } = workerData;
-
-  // Reconstruct the sort function (be cautious with eval in production)
-  // A safer way would be to pass only primitive comparators or have predefined sort strategies.
-  let compareFn;
-  if (sortFnString) {
-    try {
-      const dynamicallyCreatedSortFn = eval('(' + sortFnString + ')');
-      compareFn = (a, b) => dynamicallyCreatedSortFn(a, b, column, direction);
-    } catch (e) {
-      parentPort.postMessage({ error: 'Failed to evaluate sortFnString: ' + e.message });
-      return;
-    }
-  } else {
-    // Default comparator if no custom function string is provided
-    compareFn = (a, b) => {
-      const aVal = a[column];
-      const bVal = b[column];
-
-      if (aVal === bVal) return 0;
-      if (aVal === null || aVal === undefined) return direction === 'asc' ? -1 : 1;
-      if (bVal === null || bVal === undefined) return direction === 'asc' ? 1 : -1;
-      
-      if (typeof aVal === 'number' && typeof bVal === 'number') {
-        return direction === 'asc' ? aVal - bVal : bVal - aVal;
-      }
-      const comparison = String(aVal).localeCompare(String(bVal));
-      return direction === 'asc' ? comparison : -comparison;
-    };
-  }
-
+  const { chunk, column, direction } = workerData;
+  const compare = (a, b) => {
+    const aVal = a[column], bVal = b[column];
+    if (aVal === bVal) return 0;
+    if (aVal == null) return direction === 'asc' ? -1 : 1;
+    if (bVal == null) return direction === 'asc' ? 1 : -1;
+    const result = typeof aVal === 'number' && typeof bVal === 'number'
+      ? aVal - bVal : String(aVal).localeCompare(String(bVal));
+    return direction === 'asc' ? result : -result;
+  };
   try {
-    chunk.sort(compareFn);
-    parentPort.postMessage({ sortedChunk: chunk });
-  } catch (e) {
-    parentPort.postMessage({ error: 'Error during sort in worker: ' + e.message });
+    const sortedIndexes = chunk.map((value, index) => ({ value, index }))
+      .sort((a, b) => compare(a.value, b.value))
+      .map(entry => entry.index);
+    parentPort.postMessage({ sortedIndexes });
+  } catch (error) {
+    parentPort.postMessage({ error: String(error) });
   }
 `, {
           eval: true, // Necessary for the inline string worker
@@ -2039,15 +1966,14 @@ export class CSV<T extends Record<string, any>> {
             chunk,
             column: typeof columnOrFn !== 'function' ? columnOrFn : undefined, // Only pass column if not custom fn
             direction,
-            sortFnString: sortFnStringToWorker, // Pass the function string
           },
         });
 
         worker.on('message', (message) => {
           if (message.error) {
             reject(new CSVError(`Worker sort error (chunk ${index}): ${message.error}`, message.error));
-          } else if (message.sortedChunk) {
-            resolve(message.sortedChunk);
+          } else if (message.sortedIndexes) {
+            resolve(message.sortedIndexes.map((index: number) => chunk[index]));
           } else {
             reject(new CSVError(`Worker ${index} sent unknown message.`));
           }
@@ -2058,10 +1984,7 @@ export class CSV<T extends Record<string, any>> {
           worker.terminate();
         });
         worker.on('exit', (code) => {
-          if (code !== 0) {
-            // This might be redundant if 'error' or 'message.error' already rejected
-            // reject(new CSVError(`Worker ${index} exited with code ${code}`));
-          }
+          reject(new CSVError(`Worker ${index} exited before returning a result (code ${code}).`));
         });
       });
     });
@@ -2076,8 +1999,7 @@ export class CSV<T extends Record<string, any>> {
       // Fallback: sort in main thread if workers fail catastrophically
       // (Or rethrow, depending on desired robustness vs. performance guarantee)
       console.warn("Parallel sort failed, falling back to main thread sort.");
-      const sortedData = [...this.data].sort(compareFn);
-      return new CSV<T>(sortedData, this.additionalHeader, this.validationResults);
+      return sortLocally();
     }
   }
 
@@ -2142,26 +2064,35 @@ export class CSV<T extends Record<string, any>> {
     column: K,
     operation: AggregateOperation = 'sum'
   ): number {
-    const values = this.data
-      .map(row => Number(row[column]))
-      .filter(val => !isNaN(val));
+    let count = 0;
+    let sum = 0;
+    let min = Infinity;
+    let max = -Infinity;
+    for (const row of this.data) {
+      const value = Number(row[column]);
+      if (Number.isNaN(value)) continue;
+      count++;
+      sum += value;
+      min = Math.min(min, value);
+      max = Math.max(max, value);
+    }
 
-    if (values.length === 0) {
+    if (count === 0) {
       if (operation === 'count') return 0;
       throw new CSVError(`No numeric values found in column "${String(column)}"`);
     }
 
     switch (operation) {
       case 'sum':
-        return values.reduce((sum, val) => sum + val, 0);
+        return sum;
       case 'avg':
-        return values.reduce((sum, val) => sum + val, 0) / values.length;
+        return sum / count;
       case 'min':
-        return Math.min(...values);
+        return min;
       case 'max':
-        return Math.max(...values);
+        return max;
       case 'count':
-        return values.length;
+        return count;
       default:
         throw new CSVError(`Unknown aggregation operation: ${operation}`);
     }
@@ -2195,8 +2126,8 @@ export class CSV<T extends Record<string, any>> {
       const colKey = String(row[colColumn]);
       const value = row[valueColumn];
 
-      if (!result[rowKey]) result[rowKey] = {};
-      result[rowKey][colKey] = value;
+      if (!Object.prototype.hasOwnProperty.call(result, rowKey)) Object.defineProperty(result, rowKey, { value: {}, enumerable: true, writable: true, configurable: true });
+      Object.defineProperty(result[rowKey], colKey, { value, enumerable: true, writable: true, configurable: true });
     });
 
     return result;
@@ -2213,23 +2144,23 @@ export class CSV<T extends Record<string, any>> {
     other: E[] | CSV<E>,
     equalityFn: (a: T, b: E) => boolean,
     mergeFn: (a: T, b: E) => T
-  ): CSV<T> {
+  ): CSV<T | E> {
     const otherData = other instanceof CSV ? other.toArray() : other;
-    const result: T[] = [];
+    const result: (T | E)[] = [];
 
     // Track processed items from B
-    const processedB = new Set<E>();
+    const processedB = new Set<number>();
 
     // First pass: find matches and merge them
     for (const itemA of this.data) {
       let matched = false;
 
-      for (const itemB of otherData) {
-        if (processedB.has(itemB)) continue;
+      for (const [index, itemB] of otherData.entries()) {
+        if (processedB.has(index)) continue;
 
         if (equalityFn(itemA, itemB)) {
           result.push(mergeFn(itemA, itemB));
-          processedB.add(itemB);
+          processedB.add(index);
           matched = true;
           break;
         }
@@ -2242,9 +2173,9 @@ export class CSV<T extends Record<string, any>> {
     }
 
     // Add remaining items from B that weren't matched
-    for (const itemB of otherData) {
-      if (!processedB.has(itemB)) {
-        result.push({ ...(itemB as unknown as T) });
+    for (const [index, itemB] of otherData.entries()) {
+      if (!processedB.has(index)) {
+        result.push({ ...itemB });
       }
     }
 
@@ -2271,8 +2202,8 @@ export class CSV<T extends Record<string, any>> {
     callback: (row: T, index: number) => Promise<void>,
     options: { batchSize?: number; batchConcurrency?: number } = {}
   ): Promise<void> {
-    const batchSize = options.batchSize || 1;
-    const batchConcurrency = options.batchConcurrency || 1;
+    const batchSize = positiveInteger(options.batchSize, 1, 'batchSize');
+    const batchConcurrency = positiveInteger(options.batchConcurrency, 1, 'batchConcurrency');
 
     if (batchSize <= 1 && batchConcurrency <= 1) {
       // Original sequential processing
@@ -2282,23 +2213,10 @@ export class CSV<T extends Record<string, any>> {
       return;
     }
 
-    // Process data in batches with concurrency
-    const batches: T[][] = [];
-    for (let i = 0; i < this.data.length; i += batchSize) {
-      batches.push(this.data.slice(i, i + batchSize));
-    }
-
-    // Process batches with controlled concurrency
-    for (let i = 0; i < batches.length; i += batchConcurrency) {
-      const batchPromises = batches.slice(i, i + batchConcurrency).map(async (batch, batchIndex) => {
-        const startIdx = i * batchSize + batchIndex * batchSize;
-        const promises = batch.map((row, rowIndex) =>
-          callback(row, startIdx + rowIndex)
-        );
-        await Promise.all(promises);
-      });
-
-      await Promise.all(batchPromises);
+    const windowSize = batchSize * batchConcurrency;
+    for (let start = 0; start < this.data.length; start += windowSize) {
+      const end = Math.min(start + windowSize, this.data.length);
+      await Promise.all(this.data.slice(start, end).map((row, index) => callback(row, start + index)));
     }
   }
 
@@ -2323,8 +2241,8 @@ export class CSV<T extends Record<string, any>> {
     callback: (row: T, index: number) => Promise<R>,
     options: { batchSize?: number; batchConcurrency?: number } = {}
   ): Promise<R[]> {
-    const batchSize = options.batchSize || 1;
-    const batchConcurrency = options.batchConcurrency || 1;
+    const batchSize = positiveInteger(options.batchSize, 1, 'batchSize');
+    const batchConcurrency = positiveInteger(options.batchConcurrency, 1, 'batchConcurrency');
 
     if (batchSize <= 1 && batchConcurrency <= 1) {
       // Original sequential processing
@@ -2335,32 +2253,13 @@ export class CSV<T extends Record<string, any>> {
       return results;
     }
 
-    // Process data in batches with concurrency
-    const batches: T[][] = [];
-    for (let i = 0; i < this.data.length; i += batchSize) {
-      batches.push(this.data.slice(i, i + batchSize));
+    const results: R[] = [];
+    const windowSize = batchSize * batchConcurrency;
+    for (let start = 0; start < this.data.length; start += windowSize) {
+      const end = Math.min(start + windowSize, this.data.length);
+      const windowResults = await Promise.all(this.data.slice(start, end).map((row, index) => callback(row, start + index)));
+      for (const result of windowResults) results.push(result);
     }
-
-    // Create a sparse array to maintain order after parallel processing
-    const results: R[] = new Array(this.data.length);
-
-    // Process batches with controlled concurrency
-    for (let i = 0; i < batches.length; i += batchConcurrency) {
-      const batchPromises = batches.slice(i, i + batchConcurrency).map(async (batch, batchIndex) => {
-        const startIdx = i * batchSize + batchIndex * batchSize;
-        const batchResults = await Promise.all(
-          batch.map((row, rowIndex) => callback(row, startIdx + rowIndex))
-        );
-
-        // Insert batch results at the right position
-        batchResults.forEach((result, resultIndex) => {
-          results[startIdx + resultIndex] = result;
-        });
-      });
-
-      await Promise.all(batchPromises);
-    }
-
     return results;
   }
 
@@ -2378,20 +2277,13 @@ export class CSV<T extends Record<string, any>> {
   }
 
   /**
-   * Reduce the rows asynchronously with optimized batch processing
-   * 
-   * @description This method offers two different optimization strategies:
-   * 1. Sequential with batched preprocessing (default) - This helps when preprocessing your data 
-   *    is expensive but the actual reduction is order-dependent
-   * 2. Map-reduce style parallel processing - This requires an associative and commutative reducer
-   *    and is more efficient for large datasets with independent operations
-   * 
+   * Reduce rows asynchronously in order.
+   * The legacy mapreduce strategy also runs sequentially because a row reducer
+   * cannot safely combine partial accumulators without a separate combiner.
    * @param callback - Async reducer function
    * @param initialValue - Starting value
-   * @param options - Options for optimized processing
-   * @param options.strategy - Processing strategy: 'sequential' (default) or 'mapreduce'
-   * @param options.batchSize - Size of batches for preprocessing or parallel reduction
-   * @returns Promise resolving to reduced value
+   * @param options - Legacy strategy and batch size options
+   * @returns Promise resolving to the reduced value
    */
   async reduceAsync<R>(
     callback: (accumulator: R, row: T, index: number) => Promise<R>,
@@ -2401,75 +2293,9 @@ export class CSV<T extends Record<string, any>> {
       batchSize?: number;
     } = {}
   ): Promise<R> {
-    const batchSize = options.batchSize || 20;
-    const strategy = options.strategy || 'sequential';
-
-    // Simple sequential case for small datasets or when not optimizing
-    if (this.data.length <= batchSize || batchSize <= 1) {
-      let result = initialValue;
-      for (let i = 0; i < this.data.length; i++) {
-        result = await callback(result, this.data[i], i);
-      }
-      return result;
-    }
-
-    if (strategy === 'sequential') {
-      // Sequential with batched preprocessing optimization
-      // This helps when preprocessing your data is expensive but the reduction is order-dependent
-      let result = initialValue;
-
-      // Process data in batches
-      const batches: T[][] = [];
-      for (let i = 0; i < this.data.length; i += batchSize) {
-        batches.push(this.data.slice(i, i + batchSize));
-      }
-
-      for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-        const batch = batches[batchIndex];
-        const baseIndex = batchIndex * batchSize;
-
-        // Process the batch sequentially but with possible preprocessing optimizations
-        for (let i = 0; i < batch.length; i++) {
-          result = await callback(result, batch[i], baseIndex + i);
-        }
-      }
-
-      return result;
-    } else if (strategy === 'mapreduce') {
-      // Map-reduce style parallel processing
-      // This requires an associative and commutative reducer and is more efficient for large datasets
-
-      // Create batches
-      const batches: T[][] = [];
-      for (let i = 0; i < this.data.length; i += batchSize) {
-        batches.push(this.data.slice(i, i + batchSize));
-      }
-
-      // First, reduce each batch in parallel (map phase)
-      const batchResults = await Promise.all(
-        batches.map(async (batch, batchIndex) => {
-          const baseIndex = batchIndex * batchSize;
-          let batchResult = initialValue;
-
-          for (let i = 0; i < batch.length; i++) {
-            batchResult = await callback(batchResult, batch[i], baseIndex + i);
-          }
-
-          return batchResult;
-        })
-      );
-
-      // Then, reduce the batch results (reduce phase)
-      let finalResult = initialValue;
-      for (const batchResult of batchResults) {
-        // We use a dummy index here since we're reducing already-reduced results
-        finalResult = await callback(finalResult, batchResult as unknown as T, -1);
-      }
-
-      return finalResult;
-    }
-
-    // Fallback to standard sequential processing
+    // A row reducer cannot combine partial accumulators in general. Preserve
+    // its semantics for both strategies until a separate combiner is supplied.
+    void options;
     let result = initialValue;
     for (let i = 0; i < this.data.length; i++) {
       result = await callback(result, this.data[i], i);
@@ -2483,11 +2309,16 @@ export class CSV<T extends Record<string, any>> {
    * @returns A new CSV instance with sampled rows
    */
   sample(count: number = 1): CSV<T> {
-    if (count <= 0) return new CSV<T>([]);
-    if (count >= this.data.length) return new CSV<T>([...this.data]);
+    if (count <= 0) return new CSV<T>([], this.additionalHeader);
+    if (count >= this.data.length) return new CSV<T>([...this.data], this.additionalHeader);
 
-    const shuffled = [...this.data].sort(() => 0.5 - Math.random());
-    return new CSV<T>(shuffled.slice(0, count));
+    const shuffled = [...this.data];
+    const limit = Math.floor(count);
+    for (let i = 0; i < limit; i++) {
+      const selected = i + Math.floor(Math.random() * (shuffled.length - i));
+      [shuffled[i], shuffled[selected]] = [shuffled[selected], shuffled[i]];
+    }
+    return new CSV<T>(shuffled.slice(0, limit), this.additionalHeader);
   }
 
   /**
@@ -2514,7 +2345,7 @@ export class CSV<T extends Record<string, any>> {
    * @returns A new CSV instance with the last rows
    */
   tail(count: number = 10): CSV<T> {
-    return new CSV<T>([...this.data.slice(-count)]);
+    return new CSV<T>(count <= 0 ? [] : [...this.data.slice(-count)], this.additionalHeader);
   }
 
   /**
@@ -2549,7 +2380,7 @@ export class CSV<T extends Record<string, any>> {
   addColumn<NewKey extends string, NewValue>(
     columnName: NewKey,
     valueOrFn: NewValue | ((row: T) => NewValue)
-  ): CSV<T & Record<NewKey, NewValue>> {
+  ): CSV<ColumnUpdate<T, NewKey, NewValue>> {
     if (this.data.length > 0 && Object.prototype.hasOwnProperty.call(this.data[0], columnName)) {
       console.warn(`CSV.addColumn: Column "${columnName}" already exists. Its values will be overwritten.`);
     }
@@ -2561,9 +2392,9 @@ export class CSV<T extends Record<string, any>> {
       return {
         ...row,
         [columnName]: newValue,
-      } as T & Record<NewKey, NewValue>; // Assert the new row type
+      } as ColumnUpdate<T, NewKey, NewValue>;
     });
-    return new CSV<T & Record<NewKey, NewValue>>(newData, this.additionalHeader);
+    return new CSV<ColumnUpdate<T, NewKey, NewValue>>(newData, this.additionalHeader);
   }
 
   /**
@@ -2638,10 +2469,10 @@ export class CSV<T extends Record<string, any>> {
    * // csvRenamedName.toArray() is [{ id: 1, name: 'Alice' }]
    * ```
    */
-  renameColumn<OldK extends keyof T | string, NewK extends string>(
+  renameColumn<OldK extends string, NewK extends string>(
     oldName: OldK,
     newName: NewK
-  ): CSV<Omit<T, Extract<OldK, keyof T>> & Record<NewK, OldK extends keyof T ? T[OldK] : any>> {
+  ): CSV<RenamedColumn<T, OldK, NewK>> {
     const oldNameStr = String(oldName);
     const newNameStr = String(newName);
 
@@ -2676,7 +2507,7 @@ export class CSV<T extends Record<string, any>> {
       };
     });
     // The resulting type is complex to infer perfectly. The Omit & Record combination is a good attempt.
-    return new CSV<Omit<T, Extract<OldK, keyof T>> & Record<NewK, OldK extends keyof T ? T[OldK] : any>>(newData, this.additionalHeader);
+    return new CSV<RenamedColumn<T, OldK, NewK>>(newData, this.additionalHeader);
   }
 
   /**
@@ -2710,41 +2541,18 @@ export class CSV<T extends Record<string, any>> {
       return new CSV<T>([], this.additionalHeader); // Return new empty instance
     }
 
-    const allCurrentKeys = Object.keys(this.data[0]); // Get keys from the first row as a prototype
-    const uniqueOrderedStrNames = Array.from(new Set(orderedColumnNames.map(String)));
-
-    const finalOrder: string[] = [];
-    const remainingKeys = new Set(allCurrentKeys);
-
-    // Add keys from orderedColumnNames that exist in the data
-    uniqueOrderedStrNames.forEach(name => {
-      if (remainingKeys.has(name)) {
-        finalOrder.push(name);
-        remainingKeys.delete(name);
-      }
-    });
-
-    // Add remaining keys (those not in orderedColumnNames but in the original data)
-    // in their original relative order.
-    allCurrentKeys.forEach(key => {
-      if (remainingKeys.has(key)) { // Check if it wasn't already added
-        finalOrder.push(key);
-      }
-    });
-
-    // If finalOrder is empty (e.g., allCurrentKeys was empty, or orderedColumnNames were all non-existent)
-    // default to original keys to avoid creating empty objects.
-    const effectiveOrder = finalOrder.length > 0 ? finalOrder : allCurrentKeys;
-
+    const preferred: PropertyKey[] = Array.from(new Set(orderedColumnNames.map(key => typeof key === 'symbol' ? key : String(key))));
     const newData = this.data.map(row => {
-      const newRow: Partial<T> = {};
-      effectiveOrder.forEach(key => {
-        // Only copy properties that actually exist on the current row
-        if (Object.prototype.hasOwnProperty.call(row, key)) {
-          newRow[key as keyof T] = row[key as keyof T];
-        }
-      });
-      return newRow as T; // Cast to T, assuming the reordering preserves the necessary fields
+      const result: Record<PropertyKey, unknown> = {};
+      const ordered = preferred.filter(key => Object.prototype.propertyIsEnumerable.call(row, key));
+      const seen = new Set(ordered);
+      for (const key of Reflect.ownKeys(row)) {
+        if (!seen.has(key) && Object.prototype.propertyIsEnumerable.call(row, key)) ordered.push(key);
+      }
+      for (const key of ordered) {
+        Object.defineProperty(result, key, { value: Reflect.get(row, key), enumerable: true, writable: true, configurable: true });
+      }
+      return result as T;
     });
 
     return new CSV<T>(newData, this.additionalHeader);
@@ -2756,9 +2564,7 @@ export class CSV<T extends Record<string, any>> {
    *
    * @param columnName - The name of the column to cast. Can be `keyof T` or a string.
    * @param targetType - The target data type: 'string', 'number', 'boolean', or 'date'.
-   * @returns A new CSV instance with the column values cast.
-   *          The generic type `T` of the CSV instance does not change due to runtime casting limitations.
-   *          Users should be aware that the underlying data's types will change.
+   * @returns A new CSV instance with the cast value type reflected in its rows.
    * @example
    * ```typescript
    * // interface Product { id: string; price: string; available: string; }
@@ -2767,9 +2573,9 @@ export class CSV<T extends Record<string, any>> {
    * //   { id: '2', price: ' N/A ', available: '0' }
    * // ]);
    *
-   * let castedCsv = csv.castColumnType('id', 'number');
-   * castedCsv = castedCsv.castColumnType('price', 'number');
-   * castedCsv = castedCsv.castColumnType('available', 'boolean');
+   * const castedCsv = csv.castColumnType('id', 'number')
+   *   .castColumnType('price', 'number')
+   *   .castColumnType('available', 'boolean');
    * // castedCsv.toArray() might be:
    * // [
    * //   { id: 1, price: 19.99, available: true },
@@ -2777,11 +2583,11 @@ export class CSV<T extends Record<string, any>> {
    * // ]
    * ```
    */
-  castColumnType(
-    columnName: keyof T | string,
-    targetType: 'string' | 'number' | 'boolean' | 'date'
+  castColumnType<K extends string, C extends ColumnCastTarget>(
+    columnName: K,
+    targetType: C
     // dateFormat?: string // Kept commented as it requires an external library
-  ): CSV<T> {
+  ): CSV<CastColumn<T, K, C>> {
     const colNameStr = String(columnName);
 
     const newData = this.data.map(row => {
@@ -2851,7 +2657,7 @@ export class CSV<T extends Record<string, any>> {
         [colNameStr]: newValue,
       };
     });
-    return new CSV<T>(newData, this.additionalHeader);
+    return new CSV<CastColumn<T, K, C>>(newData as CastColumn<T, K, C>[], this.additionalHeader);
   }
 
   /**
@@ -2892,54 +2698,41 @@ export class CSV<T extends Record<string, any>> {
    * //   { id: 3, category: 'A', value: 30 }
    * // ]
    * ```
+   * Values use SameValueZero equality; objects and arrays are compared by identity.
    */
   deduplicate(columnsToCheck?: (keyof T)[]): CSV<T> {
     if (this.data.length === 0) {
       return new CSV<T>([], this.additionalHeader); // Return new empty instance
     }
 
-    const seen = new Set<string>();
+    // A trie preserves value types and tuple boundaries without serializing
+    // objects or conflating values such as 1 and "1".
+    type DeduplicationNode = Map<unknown, DeduplicationNode>;
+    const seen: DeduplicationNode = new Map();
+    const terminal = Symbol('row');
     const newData: T[] = [];
-    // Determine the keys to use for uniqueness check once
-    const effectiveColumnsToCheck = (columnsToCheck && columnsToCheck.length > 0)
-      ? columnsToCheck
-      : (this.data.length > 0 ? Object.keys(this.data[0]) as (keyof T)[] : []); // Fallback to all keys from first row
-
-    if (effectiveColumnsToCheck.length === 0 && this.data.length > 0) {
-      // This case implies all rows are considered unique if columnsToCheck is effectively empty
-      // but data exists. Usually, if columnsToCheck is empty, we use all columns.
-      // The logic above means Object.keys(this.data[0]) is used.
-      // If this.data[0] was empty object, then all rows would be "" key.
-      console.warn("CSV.deduplicate: No columns to check for uniqueness effectively; if all rows are empty objects, only one will be kept.");
-    }
-
-
-    this.data.forEach(row => {
-      let key: string;
-      if (columnsToCheck && columnsToCheck.length > 0) { // User explicitly provided columns
-        key = columnsToCheck
-          .map(colName => {
-            const val = row[colName];
-            // Consistent stringification for Set key (null/undefined become specific strings)
-            return val === null ? 'null' : (val === undefined ? 'undefined' : String(val));
-          })
-          .join('||::||'); // Use a more unique separator
+    const selectedColumns = columnsToCheck?.length ? columnsToCheck : undefined;
+    for (const row of this.data) {
+      const parts: unknown[] = [];
+      if (selectedColumns) {
+        for (const column of selectedColumns) parts.push(row[column]);
       } else {
-        // Use all values in the row (in the order of keys from the first row for consistency)
-        key = (Object.keys(row) as (keyof T)[]) // Get keys from current row to handle sparse data
-          .sort() // Sort keys for consistent key generation regardless of original object order
-          .map(k => {
-            const val = row[k];
-            return `${String(k)}:${val === null ? 'null' : (val === undefined ? 'undefined' : String(val))}`;
-          })
-          .join('||::||');
+        for (const key of Object.keys(row).sort()) parts.push(key, row[key]);
       }
-
-      if (!seen.has(key)) {
-        seen.add(key);
-        newData.push({ ...row }); // Push a shallow copy
+      let node = seen;
+      for (const part of parts) {
+        let child = node.get(part);
+        if (!child) {
+          child = new Map();
+          node.set(part, child);
+        }
+        node = child;
       }
-    });
+      if (!node.has(terminal)) {
+        node.set(terminal, new Map());
+        newData.push({ ...row });
+      }
+    }
 
     return new CSV<T>(newData, this.additionalHeader);
   }
@@ -3047,7 +2840,7 @@ export class CSV<T extends Record<string, any>> {
    */
   join<
     OtherRowType extends Record<string, any>,
-    JoinedRowType extends Record<string, any> = T & Partial<OtherRowType>
+    JoinedRowType extends Record<string, any> = JoinedRow<T, OtherRowType>
   >(
     otherCsv: CSV<OtherRowType>,
     onConfig: { // Renamed 'on' to 'onConfig' to avoid conflict with potential future JS keyword
@@ -3164,31 +2957,12 @@ export class CSV<T extends Record<string, any>> {
     valueName: ValueNameCol = 'value' as ValueNameCol
   ): CSV<
     Pick<T, IdKeys> &
-    Record<VarNameCol, ValueKeys extends string ? ValueKeys : string> & // Type of variable name is the string literal of ValueKeys if possible
+    Record<VarNameCol, ValueKeys> & // The variable value is the original column key
     Record<ValueNameCol, T[ValueKeys]> // Type of value is the union of types of values in ValueKeys
   > {
-    if (idCols.length === 0 && valueCols.length === 0) {
-      console.warn("CSV.unpivot: Both idCols and valueCols are empty. Returning original data structure.");
-      return this as any; // Or a new CSV with copied data if strict immutability is preferred
-    }
-    if (valueCols.length === 0) {
-      console.warn("CSV.unpivot: valueCols is empty. No columns to unpivot. Returning data with only idCols.");
-      // This effectively becomes a select operation on idCols
-      const selectedData = this.data.map(row => {
-        const newRow: Partial<Pick<T, IdKeys>> = {};
-        idCols.forEach(idCol => {
-          if (Object.prototype.hasOwnProperty.call(row, idCol)) {
-            newRow[idCol] = row[idCol];
-          }
-        });
-        return newRow as Pick<T, IdKeys>;
-      });
-      return new CSV(selectedData as any[], this.additionalHeader);
-    }
-
     const newData: Array<
       Pick<T, IdKeys> &
-      Record<VarNameCol, ValueKeys extends string ? ValueKeys : string> &
+      Record<VarNameCol, ValueKeys> &
       Record<ValueNameCol, T[ValueKeys]>
     > = [];
 
@@ -3207,7 +2981,7 @@ export class CSV<T extends Record<string, any>> {
             [varName]: valueColKey, // valueColKey is keyof T, will be stringified
             [valueName]: row[valueColKey],
           } as Pick<T, IdKeys> &
-            Record<VarNameCol, ValueKeys extends string ? ValueKeys : string> &
+            Record<VarNameCol, ValueKeys> &
             Record<ValueNameCol, T[ValueKeys]>;
           newData.push(newRow);
         } else {
@@ -3219,7 +2993,7 @@ export class CSV<T extends Record<string, any>> {
 
     return new CSV<
       Pick<T, IdKeys> &
-      Record<VarNameCol, ValueKeys extends string ? ValueKeys : string> &
+      Record<VarNameCol, ValueKeys> &
       Record<ValueNameCol, T[ValueKeys]>
     >(newData, this.additionalHeader);
   }
@@ -3255,28 +3029,26 @@ export class CSV<T extends Record<string, any>> {
    * const filledComplex = csv.fillMissingValues('price', row => (row.category === 'Fruit' ? 0.75 : 0.5));
    * ```
    */
-  fillMissingValues<K extends keyof T>(
+  fillMissingValues<K extends keyof T, V>(
     columnName: K,
-    valueOrFn: T[K] | any | ((row: T) => T[K] | any) // Allow 'any' for flexibility if new value type differs
-  ): CSV<T> { // Type T remains, but underlying data changes.
-    const colNameStr = String(columnName);
-
+    valueOrFn: V | ((row: T) => V)
+  ): CSV<FilledColumn<T, K, V>> {
     const newData = this.data.map(row => {
-      const currentValue = (row as any)[colNameStr]; // Dynamic access
+      const currentValue = row[columnName];
 
       if (currentValue === null || currentValue === undefined) {
         const newValue = typeof valueOrFn === 'function'
-          ? (valueOrFn as (row: T) => T[K] | any)(row)
+          ? (valueOrFn as (row: T) => V)(row)
           : valueOrFn;
         return {
           ...row,
-          [colNameStr]: newValue,
+          [columnName]: newValue,
         };
       }
       return { ...row }; // Return a copy even if no change for consistency
     });
 
-    return new CSV<T>(newData, this.additionalHeader);
+    return new CSV<FilledColumn<T, K, V>>(newData as FilledColumn<T, K, V>[], this.additionalHeader);
   }
 
 
@@ -3311,8 +3083,8 @@ export class CSV<T extends Record<string, any>> {
   normalizeText<K extends keyof T>(
     columnName: K,
     normalizationType: 'lowercase' | 'uppercase' | 'capitalize'
-  ): CSV<T> {
-    const colNameStr = String(columnName);
+  ): CSV<TextColumn<T, K>> {
+    const colNameStr = columnName;
 
     const capitalizeWord = (str: string): string => {
       if (!str) return '';
@@ -3362,7 +3134,7 @@ export class CSV<T extends Record<string, any>> {
       };
     });
 
-    return new CSV<T>(newData, this.additionalHeader);
+    return new CSV<TextColumn<T, K>>(newData as TextColumn<T, K>[], this.additionalHeader);
   }
 
   /**
@@ -3389,18 +3161,16 @@ export class CSV<T extends Record<string, any>> {
    * // trimmedAll.toArray()[0] is { name: 'Alice', city: 'New York', zip: 10001 }
    * ```
    */
-  trimWhitespace(columns?: (keyof T | string)[]): CSV<T> {
+  trimWhitespace(columns?: (keyof T | string)[]): CSV<TextColumns<T>> {
     if (this.data.length === 0) {
-      return new CSV<T>([], this.additionalHeader);
+      return new CSV<TextColumns<T>>([], this.additionalHeader);
     }
 
-    const columnsToProcess = columns && columns.length > 0
-      ? columns.map(String) // Convert all to string for consistent key access
-      : Object.keys(this.data[0]); // Default to all keys from the first row
+    const columnsToProcess = columns && columns.length > 0 ? columns.map(String) : undefined;
 
     const newData = this.data.map(row => {
       const newRow = { ...row };
-      columnsToProcess.forEach(colKeyStr => {
+      (columnsToProcess ?? Object.keys(row)).forEach(colKeyStr => {
         const colKey = colKeyStr as keyof T; // Assume string keys correspond to T's keys
         if (Object.prototype.hasOwnProperty.call(newRow, colKey) && typeof newRow[colKey] === 'string') {
           (newRow[colKey] as any) = (newRow[colKey] as string).trim();
@@ -3409,7 +3179,7 @@ export class CSV<T extends Record<string, any>> {
       return newRow; // Type T is preserved as structure doesn't change
     });
 
-    return new CSV<T>(newData, this.additionalHeader);
+    return new CSV<TextColumns<T>>(newData as TextColumns<T>[], this.additionalHeader);
   }
 
   /**
@@ -3421,7 +3191,8 @@ export class CSV<T extends Record<string, any>> {
  * This stream starts directly with parsed CSV data rows.
  *
  * @param filename The path to the CSV file.
- * @param options Reading options, primarily `csvOptions` for `csv-parse` and `headerMap`.
+ * @param options Reading options, including `csvOptions`, `headerMap`, `customCasts` and `schema`.
+ * Schema validation runs per row; `keep` retains invalid rows without collecting validation results.
  * @returns A `CSVStreamProcessor` instance ready to configure and run a stream pipeline.
  */
   // Assuming CsvParseUserOptions and CsvParseInternalOptions are correctly defined
@@ -3436,16 +3207,15 @@ export class CSV<T extends Record<string, any>> {
 
     const sourceFactory = (): Readable => { // This factory MUST return a Readable stream
       const resolvedPath = path.resolve(filename);
-      const fileReadStream: fs.ReadStream = fs.createReadStream(resolvedPath, options.fsOptions);
-
       // 1. Prepare options for the main CSV parser (parseCSVAsync)
-      const mainDataParserOptions: CsvParseInternalOptions<any> = options.csvOptions
-        ? { ...(options.csvOptions as CsvParseOptions<any>) }
-        : {};
+      const mainDataParserOptions: CsvParseInternalOptions<any> = {
+        bom: true,
+        ...(options.csvOptions as CsvParseOptions<any> | undefined),
+      };
 
       const getCsvFromLineValue = (csvOpts?: CsvParseOptions<any>): number | undefined => {
         if (!csvOpts) return undefined;
-        return normalizeLineNumber(csvOpts.from ?? csvOpts.from_line ?? csvOpts.fromLine);
+        return normalizeLineNumber(csvOpts.from_line ?? csvOpts.fromLine);
       };
       const initialFromForData = getCsvFromLineValue(mainDataParserOptions); // Use options.csvOptions from the CSVReadOptions
 
@@ -3454,7 +3224,6 @@ export class CSV<T extends Record<string, any>> {
       } else {
         mainDataParserOptions.from_line = 1;
       }
-      delete mainDataParserOptions.from;
       delete mainDataParserOptions.fromLine;
       const normalizedFromLine = normalizeLineNumber(mainDataParserOptions.from_line);
       if (normalizedFromLine !== undefined) {
@@ -3464,41 +3233,45 @@ export class CSV<T extends Record<string, any>> {
       }
 
       const toLineForData = normalizeLineNumber(mainDataParserOptions.to_line ?? mainDataParserOptions.toLine);
-      if (toLineForData !== undefined && mainDataParserOptions.to === undefined) {
-        mainDataParserOptions.to = toLineForData;
-      }
-      delete mainDataParserOptions.to_line; delete mainDataParserOptions.toLine;
+      if (toLineForData !== undefined) mainDataParserOptions.to_line = toLineForData;
+      else delete mainDataParserOptions.to_line;
+      delete mainDataParserOptions.toLine;
 
       // Set columns behavior for mainDataParserOptions
       // This stream processor outputs objects, so columns: true (or array/fn) is needed for mainCsvParser
       // unless the user *explicitly* wants arrays from the source stream.
-      if (options.headerMap) {
-        mainDataParserOptions.columns = true; // HeaderMap needs objects from parser
-      } else {
-        // If user set columns: false, respect it. Otherwise, default to true for objectMode streams.
-        if (mainDataParserOptions.columns === undefined) {
-          mainDataParserOptions.columns = true;
-        }
-      }
+      if (mainDataParserOptions.columns === undefined) mainDataParserOptions.columns = true;
 
       // 2. Create the main CSV parser
       // parseCSVAsync returns a Transform stream
+      const mapper = options.headerMap ? createHeaderMapFns<SourceRowType>(options.headerMap) : undefined;
       const mainCsvParser: Transform = parseCSVAsync(mainDataParserOptions);
+      const fileReadStream: fs.ReadStream = fs.createReadStream(resolvedPath, options.fsOptions);
+      mainCsvParser.on('close', () => fileReadStream.destroy());
 
       // 3. Optionally create and pipe through a headerMap transform
       let outputProducingStream: Readable = mainCsvParser; // This is the stream that will output SourceRowType objects
 
-      if (options.headerMap && options.headerMap) { // Ensure options.headerMap is truthy
+      if (mapper || options.customCasts || options.schema || options.allowEmptyValues === false) {
+        const rowOptions = { ...options, headerMap: undefined };
+        let rowIndex = 0;
         const headerMapTransform: Transform = new Transform({
           objectMode: true, // Expects objects from mainCsvParser, outputs mapped objects
-          transform(parsedRow: Record<string, any>, _encoding, callback) { // Input is from mainCsvParser
+          async transform(parsedRow: Record<string, any>, _encoding, callback) {
             try {
-              // Ensure options.headerMap is valid and createHeaderMapFns returns the expected functions
-              const mappedRow = createHeaderMapFns<SourceRowType>(options.headerMap!).fromRowArr(parsedRow);
-              this.push(mappedRow);
-              callback();
+              const mapped = mapper ? mapper.fromRowArr(parsedRow) : parsedRow;
+              const processed = CSV.processCSVData<SourceRowType>([mapped], rowOptions, ++rowIndex)[0];
+              if (options.schema) {
+                const [validated] = options.schema.useAsync === false
+                  ? CSV._validateWithSchemaSync([processed], options.schema)
+                  : await CSV._validateWithSchemaAsync([processed], options.schema);
+                if (validated.length) callback(null, validated[0]);
+                else callback();
+              } else {
+                callback(null, processed);
+              }
             } catch (err) {
-              callback(err instanceof Error ? err : new CSVError("Error in stream headerMap transform", err));
+              callback(err instanceof Error ? err : new CSVError('Error processing streamed row', err));
             }
           }
         });
@@ -3507,6 +3280,7 @@ export class CSV<T extends Record<string, any>> {
         mainCsvParser.pipe(headerMapTransform);
         // Propagate errors from mainCsvParser to headerMapTransform
         mainCsvParser.on('error', (err) => headerMapTransform.destroy(err));
+        headerMapTransform.on('close', () => mainCsvParser.destroy());
 
         outputProducingStream = headerMapTransform; // headerMapTransform is now the final data source
       }
@@ -3545,7 +3319,7 @@ export const CSVUtils = {
     arrayB: E[],
     equalityFn: (a: T, b: E) => boolean,
     mergeFn: (a: T, b: E) => T & Record<string, any>
-  ): T[] {
+  ): (T | E)[] {
     const csvInstance = CSV.fromData<T>(arrayA);
     return csvInstance
       .mergeWith<E>(arrayB, 
@@ -3742,8 +3516,9 @@ export const CSVUtils = {
     if (items.length === 0) return [];
 
     // Determine the number of workers
-    const cpuCount = require('os').cpus().length;
-    const maxWorkers = options.maxWorkers || cpuCount;
+    const cpuCount = os.cpus().length;
+    const maxWorkers = positiveInteger(options.maxWorkers, cpuCount, 'maxWorkers');
+    const requestedChunkSize = options.chunkSize === undefined ? undefined : positiveInteger(options.chunkSize, 1, 'chunkSize');
     const workerCount = Math.min(maxWorkers, items.length, cpuCount);
 
     // If only a few items or just one worker, process directly
@@ -3753,20 +3528,20 @@ export const CSVUtils = {
 
     // Split items into chunks
     const chunks: T[][] = [];
-    const chunkSize = options.chunkSize || Math.ceil(items.length / workerCount);
+    const chunkSize = requestedChunkSize ?? Math.ceil(items.length / workerCount);
 
     for (let i = 0; i < items.length; i += chunkSize) {
       chunks.push(items.slice(i, i + chunkSize));
     }
 
-    // Process each chunk in a separate worker
-    const promises = chunks.map(chunk =>
-      this.processInWorker(operation, chunk)
-    );
-
-    // Combine results
-    const results = await Promise.all(promises);
-    return results.flat();
+    // Limit concurrently running workers even when a small chunk size is requested.
+    const results: R[] = [];
+    for (let start = 0; start < chunks.length; start += workerCount) {
+      const batch = chunks.slice(start, start + workerCount);
+      const completed = await Promise.all(batch.map(chunk => this.processInWorker(operation, chunk)));
+      for (const output of completed) for (const item of output) results.push(item);
+    }
+    return results;
   }
 };
 
@@ -3780,23 +3555,26 @@ export async function* csvGenerator<T extends Record<string, any>>(
   filename: string,
   options: CSVStreamOptions<T> = {}
 ): AsyncGenerator<T, void, undefined> {
-  const resolvedPath = path.resolve(filename);
-  const csvContent = fs.readFileSync(resolvedPath, 'utf-8');
-
-  const csvOptions: CsvParseOptionsWithColumns<any> = {
+  const parser = parseCSVAsync({
+    bom: true,
     ...(options.csvOptions as CsvParseOptionsType<any> | undefined),
-    columns: true // Ensure we get objects, not arrays
-  };
+    columns: true,
+  });
+  const input = fs.createReadStream(path.resolve(filename), { encoding: 'utf-8' });
+  input.on('error', error => parser.destroy(error));
+  input.pipe(parser);
 
-  const records = parseCSV(csvContent, csvOptions) as T[];
-
-  const headerMap = options.headerMap;
-  const transformFn = options.transform;
-  const { fromRowArr } = headerMap ? createHeaderMapFns<T>(headerMap) : { fromRowArr: null };
-
-  for (const record of records) {
-    const processedRecord = fromRowArr ? fromRowArr(record) : record;
-    yield transformFn ? transformFn(processedRecord) : processedRecord;
+  try {
+    const { fromRowArr } = options.headerMap
+      ? createHeaderMapFns<T>(options.headerMap)
+      : { fromRowArr: null };
+    for await (const record of parser) {
+      const processedRecord = fromRowArr ? fromRowArr(record) : record;
+      yield options.transform ? options.transform(processedRecord) : processedRecord;
+    }
+  } finally {
+    input.destroy();
+    parser.destroy();
   }
 }
 
@@ -3810,7 +3588,7 @@ export async function* csvBatchGenerator<T extends Record<string, any>>(
   filename: string,
   options: CSVStreamOptions<T> = { batchSize: 100 }
 ): AsyncGenerator<T[], void, undefined> {
-  const batchSize = options.batchSize || 100;
+  const batchSize = positiveInteger(options.batchSize, 100, 'batchSize');
   let batch: T[] = [];
 
   for await (const record of csvGenerator<T>(filename, options)) {
@@ -3849,7 +3627,6 @@ export async function writeCSVFromGenerator<T extends Record<string, any>>(
       data.push(row);
     }
 
-    // Use the synchronous writeToFile method
     const csv = CSV.fromData(data);
     csv.writeToFile(outputPath, options);
   } catch (error) {
@@ -3914,7 +3691,7 @@ export const CSVArrayUtils = {
     return data.map(row => {
       // If working with arrays and string header maps, convert to object first
       if (isArrayData && hasStringKeys && headerRow) {
-        const objRow: Record<string, any> = {};
+        const objRow: Record<string, any> = Object.create(null);
         for (let i = 0; i < row.length && i < headerRow.length; i++) {
           objRow[headerRow[i]] = row[i];
         }
@@ -3959,30 +3736,7 @@ export const CSVArrayUtils = {
     headers: string[] = [],
     includeHeaders: boolean = false
   ): any[][] {
-    if (!Array.isArray(data)) {
-      throw new CSVError('Data must be an array');
-    }
-
-    if (data.length === 0) {
-      return includeHeaders && headers.length > 0 ? [headers] : [];
-    }
-
-    const inverseMap: { [x: string]: string;[x: number]: string } = {};
-    for (const [key, value] of Object.entries(headerMap)) {
-      if (typeof value === 'string' || typeof value === 'number') {
-        inverseMap[value] = key;
-      }
-    }
-
-    const { toRowArr } = createHeaderMapFns(inverseMap);
-
-    const rows = data.map(obj => toRowArr(obj, headers));
-
-    if (includeHeaders && headers.length > 0) {
-      return [headers, ...rows];
-    }
-
-    return rows;
+    return mapObjectsToRows(data, headerMap, headers, includeHeaders);
   },
 
   /**
@@ -4007,9 +3761,9 @@ export const CSVArrayUtils = {
     field: string
   ): Record<string, T[]> {
     return data.reduce((groups, item) => {
-      const key = String(getPathValue(item, field) || 'undefined');
-      if (!groups[key]) {
-        groups[key] = [];
+      const key = String(getPathValue(item, field) ?? 'undefined');
+      if (!Object.prototype.hasOwnProperty.call(groups, key)) {
+        Object.defineProperty(groups, key, { value: [], enumerable: true, writable: true, configurable: true });
       }
       groups[key].push(item);
       return groups;
@@ -4056,7 +3810,7 @@ interface TerminalActionConfig {
  * @template InType The type of rows coming from the initial source stream (after initial parsing).
  * @template OutType The type of rows produced by the current last stage of the pipeline.
  */
-export class CSVStreamProcessor<InType extends Record<string, any>, OutType extends Record<string, any> = InType> {
+export class CSVStreamProcessor<InType extends Record<string, any>, OutType extends Record<string, any> = InType, Action extends 'collect' | 'void' = 'void'> {
   private readonly sourceStreamFactory: () => Readable;
   private readonly transformFactories: ReadonlyArray<(currentStream: Readable) => Readable>;
   private readonly terminalActionConfig: TerminalActionConfig;
@@ -4094,8 +3848,8 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
    */
   private _cloneWithNewTransform<NewOutType extends Record<string, any>>(
     transformFactory: (currentStream: Readable) => Readable
-  ): CSVStreamProcessor<InType, NewOutType> {
-    return new CSVStreamProcessor<InType, NewOutType>(
+  ): CSVStreamProcessor<InType, NewOutType, Action> {
+    return new CSVStreamProcessor<InType, NewOutType, Action>(
       this.sourceStreamFactory,
       [...this.transformFactories, transformFactory],
       this.terminalActionConfig // Intermediate ops don't change terminal config
@@ -4105,10 +3859,10 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
   /**
    * @internal Helper to create a new processor instance with a new terminal action.
    */
-  private _cloneWithTerminalAction(
+  private _cloneWithTerminalAction<NewAction extends 'collect' | 'void'>(
     actionConfig: TerminalActionConfig
-  ): CSVStreamProcessor<InType, OutType> {
-    return new CSVStreamProcessor<InType, OutType>(
+  ): CSVStreamProcessor<InType, OutType, NewAction> {
+    return new CSVStreamProcessor<InType, OutType, NewAction>(
       this.sourceStreamFactory,
       this.transformFactories, // Keep existing transforms
       actionConfig // Set/replace the terminal action
@@ -4150,7 +3904,7 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
    * // processor.filter(user => user.age > 30)
    * ```
    */
-  filter(condition: (row: OutType) => boolean | Promise<boolean>): CSVStreamProcessor<InType, OutType> {
+  filter(condition: (row: OutType) => boolean | Promise<boolean>): CSVStreamProcessor<InType, OutType, Action> {
     return this._cloneWithNewTransform<OutType>((currentStream: Readable) => {
       const filterTransform = new Transform({
         objectMode: true,
@@ -4166,6 +3920,7 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
         }
       });
       currentStream.on('error', (err) => filterTransform.destroy(err)); // Propagate errors
+      filterTransform.on('close', () => currentStream.destroy());
       return currentStream.pipe(filterTransform);
     });
   }
@@ -4183,7 +3938,7 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
    */
   map<NewOutType extends Record<string, any>>(
     transformFn: (row: OutType) => NewOutType | Promise<NewOutType>
-  ): CSVStreamProcessor<InType, NewOutType> {
+  ): CSVStreamProcessor<InType, NewOutType, Action> {
     return this._cloneWithNewTransform<NewOutType>((currentStream: Readable) => {
       const mapTransform = new Transform({
         objectMode: true,
@@ -4197,6 +3952,7 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
         }
       });
       currentStream.on('error', (err) => mapTransform.destroy(err)); // Propagate errors
+      mapTransform.on('close', () => currentStream.destroy());
       return currentStream.pipe(mapTransform);
     });
   }
@@ -4219,8 +3975,8 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
   addColumn<NewKey extends string, NewValue>(
     columnName: NewKey,
     valueOrFn: NewValue | ((row: OutType) => NewValue | Promise<NewValue>)
-  ): CSVStreamProcessor<InType, OutType & Record<NewKey, NewValue>> {
-    return this._cloneWithNewTransform<OutType & Record<NewKey, NewValue>>((currentStream: Readable) => {
+  ): CSVStreamProcessor<InType, ColumnUpdate<OutType, NewKey, NewValue>, Action> {
+    return this._cloneWithNewTransform<ColumnUpdate<OutType, NewKey, NewValue>>((currentStream: Readable) => {
       const addColumnTransform = new Transform({
         objectMode: true,
         async transform(row: OutType, _encoding, callback) {
@@ -4236,6 +3992,7 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
         }
       });
       currentStream.on('error', (err) => addColumnTransform.destroy(err)); // Propagate errors
+      addColumnTransform.on('close', () => currentStream.destroy());
       return currentStream.pipe(addColumnTransform);
     });
   }
@@ -4248,8 +4005,8 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
    * Use with caution for very large datasets as it loads all data into memory.
    * @returns A new `CSVStreamProcessor` instance configured for collection.
    */
-  prepareCollect(): CSVStreamProcessor<InType, OutType> {
-    return this._cloneWithTerminalAction({ type: TerminalActionType.Collect });
+  prepareCollect(): CSVStreamProcessor<InType, OutType, 'collect'> {
+    return this._cloneWithTerminalAction<'collect'>({ type: TerminalActionType.Collect });
   }
 
   /**
@@ -4260,7 +4017,7 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
    * @returns A new `CSVStreamProcessor` instance configured for file writing.
    */
   prepareToFile(filename: string, writeOptions?: CSVWriteOptions<OutType>): CSVStreamProcessor<InType, OutType> {
-    return this._cloneWithTerminalAction({ type: TerminalActionType.ToFile, filename, writeOptions });
+    return this._cloneWithTerminalAction<'void'>({ type: TerminalActionType.ToFile, filename, writeOptions });
   }
 
   /**
@@ -4270,7 +4027,7 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
    * @returns A new `CSVStreamProcessor` instance configured for row-by-row processing.
    */
   prepareForEach(callback: (row: OutType) => void | Promise<void>): CSVStreamProcessor<InType, OutType> {
-    return this._cloneWithTerminalAction({ type: TerminalActionType.ForEach, forEachCallback: callback });
+    return this._cloneWithTerminalAction<'void'>({ type: TerminalActionType.ForEach, forEachCallback: callback });
   }
 
   /**
@@ -4280,10 +4037,10 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
    * @param options Options for the pipe operation (e.g., `{ end?: boolean }`).
    * @returns A new `CSVStreamProcessor` instance configured for piping.
    */
-  preparePipeTo(destination: Writable, _options?: { end?: boolean }): CSVStreamProcessor<InType, OutType> {
-    return this._cloneWithTerminalAction({
+  preparePipeTo(destination: Writable, options?: { end?: boolean }): CSVStreamProcessor<InType, OutType> {
+    return this._cloneWithTerminalAction<'void'>({
       type: TerminalActionType.PipeTo, destinationStream: destination,
-      // pipeOptions: options 
+      pipeOptions: options
     });
   }
 
@@ -4302,6 +4059,7 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
    *            `Promise<void>` (resolves when the stream is fully consumed, data is discarded if not iterated).
    * @throws {CSVError} if an error occurs during stream processing or if a required parameter for a terminal action is missing.
    */
+  run(): Promise<Action extends 'collect' ? CSV<OutType> : void>;
   async run(): Promise<CSV<OutType> | void> {
     const pipelineToRun = this._buildPipeline();
 
@@ -4321,13 +4079,42 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
           const { filename, writeOptions } = this.terminalActionConfig;
           if (!filename) return Promise.reject(new CSVError("Filename not provided for toFile action."));
           const stringifyOpts = writeOptions?.stringifyOptions || { header: true, bom: true };
-          // Use a type assertion to help TypeScript understand this is valid
-          const csvStringifier = stringifyCSVAsync(stringifyOpts) as Transform;
-          const fileWriteStream = fs.createWriteStream(filename, { encoding: 'utf-8' });
-          if (writeOptions?.additionalHeader) {
-            fileWriteStream.write(writeOptions.additionalHeader);
+          const prepared = prepareStreamingHeader(writeOptions?.additionalHeader ?? '', stringifyOpts);
+          const headerMap = writeOptions?.headerMap;
+          let mappedStream: Readable = pipelineToRun;
+          let outputOptions = normalizeWriteStringifyOptions(prepared.options);
+          if (headerMap) {
+            const headers: string[] = Array.isArray(stringifyOpts.header) ? [...stringifyOpts.header] : [];
+            if (!Array.isArray(stringifyOpts.header)) {
+              for (const rule of Object.values(headerMap)) {
+                if (typeof rule === 'string') headers.push(rule);
+                else if (rule && typeof rule === 'object' && rule._type === 'targetArrayToCsv') {
+                  if (rule.targetCsvColumns) headers.push(...rule.targetCsvColumns);
+                  else if (rule.targetCsvColumnPrefix) {
+                    if (rule.maxColumns === undefined) throw new CSVError('Streaming array header mapping requires maxColumns or explicit headers');
+                    for (let i = 1; i <= rule.maxColumns; i++) headers.push(`${rule.targetCsvColumnPrefix}${i}`);
+                  }
+                }
+              }
+            }
+            const { toRowArr } = createWriteHeaderMapFns<OutType>(headerMap);
+            const mapper = new Transform({
+              objectMode: true,
+              transform(row, _encoding, callback) {
+                try { callback(null, toRowArr(row, headers)); }
+                catch (error) { callback(error as Error); }
+              }
+            });
+            pipelineToRun.on('error', error => mapper.destroy(error));
+            mapper.on('error', () => pipelineToRun.destroy());
+            mappedStream = pipelineToRun.pipe(mapper);
+            outputOptions = { ...prepared.options, columns: headers, header: Array.isArray(stringifyOpts.header) ? false : stringifyOpts.header };
           }
-          await pipelineAsync(pipelineToRun, csvStringifier, fileWriteStream);
+          // Use a type assertion to help TypeScript understand this is valid
+          const csvStringifier = stringifyCSVAsync(outputOptions) as Transform;
+          const fileWriteStream = fs.createWriteStream(filename, { encoding: 'utf-8' });
+          if (prepared.header) fileWriteStream.write(prepared.header);
+          await pipelineAsync(mappedStream, csvStringifier, fileWriteStream);
           return; // Resolve void
 
         case TerminalActionType.ForEach:
@@ -4340,14 +4127,22 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
           return; // Resolve void
 
         case TerminalActionType.PipeTo: // CORRECTED
-          const { destinationStream } = this.terminalActionConfig; // Removed pipeOptions from here
+          const { destinationStream, pipeOptions } = this.terminalActionConfig;
           if (!destinationStream) {
             return Promise.reject(new CSVError("Destination stream not provided for pipeTo action."));
           }
-          // Using pipelineAsync for robust error handling and promise-based flow.
-          // stream.pipeline does not accept the { end: boolean } option directly.
-          // Its default behavior is equivalent to { end: true }.
-          await pipelineAsync(pipelineToRun, destinationStream);
+          if (pipeOptions?.end === false) {
+            const proxy = new Writable({
+              objectMode: destinationStream.writableObjectMode,
+              write(chunk, encoding, callback) { destinationStream.write(chunk, encoding, callback); }
+            });
+            const onDestinationError = (error: Error) => proxy.destroy(error);
+            destinationStream.on('error', onDestinationError);
+            try { await pipelineAsync(pipelineToRun, proxy); }
+            finally { destinationStream.off('error', onDestinationError); }
+          } else {
+            await pipelineAsync(pipelineToRun, destinationStream);
+          }
           return; // Resolve void
 
         case TerminalActionType.None:
@@ -4363,154 +4158,14 @@ export class CSVStreamProcessor<InType extends Record<string, any>, OutType exte
       }
     } catch (err) {
       // This catch block handles errors from await pipelineAsync and other synchronous parts
+      pipelineToRun.destroy();
       throw err instanceof CSVError ? err : new CSVError("Unhandled error in CSVStreamProcessor.run()", err);
     }
   }
 
-  /**
-   * @internal Helper to adapt a Readable stream to an AsyncGenerator with memory efficiency.
-   * Uses a fixed-size ring buffer to limit memory usage during streaming.
-   * @param stream The readable stream to convert to an async generator
-   * @param bufferSize The maximum number of items to keep in memory (default: 1000)
-   */
-  private async *_yieldFromStream(
-    stream: Readable,
-    bufferSize: number = 1000
-  ): AsyncGenerator<OutType, void, undefined> {
-    // Create a fixed-size circular buffer to limit memory usage
-    class CircularBuffer<T> {
-      private buffer: Array<T | undefined>;
-      private head: number = 0;
-      private tail: number = 0;
-      private _size: number = 0;
-      private readonly capacity: number;
-
-      constructor(capacity: number) {
-        this.capacity = Math.max(capacity, 2); // Min size of 2
-        this.buffer = new Array<T | undefined>(this.capacity);
-      }
-
-      get size(): number {
-        return this._size;
-      }
-
-      get isFull(): boolean {
-        return this._size === this.capacity;
-      }
-
-      get isEmpty(): boolean {
-        return this._size === 0;
-      }
-
-      push(item: T): void {
-        // If full, oldest item will be overwritten
-        if (this.isFull) {
-          this.head = (this.head + 1) % this.capacity;
-          this._size--;
-        }
-
-        this.buffer[this.tail] = item;
-        this.tail = (this.tail + 1) % this.capacity;
-        this._size++;
-      }
-
-      shift(): T | undefined {
-        if (this.isEmpty) return undefined;
-
-        const item = this.buffer[this.head];
-        this.buffer[this.head] = undefined; // Help GC
-        this.head = (this.head + 1) % this.capacity;
-        this._size--;
-
-        return item;
-      }
-
-      clear(): void {
-        this.buffer.fill(undefined);
-        this.head = 0;
-        this.tail = 0;
-        this._size = 0;
-      }
-    }
-
-    // Create a buffer with the specified capacity
-    const dataBuffer = new CircularBuffer<OutType>(bufferSize);
-    let streamEnded = false;
-    let streamError: Error | null = null;
-    let waitingForDataResolver: ((value?: any) => void) | null = null;
-    let backpressureApplied = false;
-
-    // Set up stream handlers
-    const onData = (chunk: OutType) => {
-      dataBuffer.push(chunk);
-
-      // Apply backpressure if buffer is getting full
-      if (!backpressureApplied && dataBuffer.size >= bufferSize * 0.8) {
-        backpressureApplied = true;
-        stream.pause();
-      }
-
-      if (waitingForDataResolver) {
-        waitingForDataResolver();
-        waitingForDataResolver = null;
-      }
-    };
-
-    const onEnd = () => {
-      streamEnded = true;
-      if (waitingForDataResolver) {
-        waitingForDataResolver();
-        waitingForDataResolver = null;
-      }
-    };
-
-    const onError = (err: Error) => {
-      streamError = err;
-      if (waitingForDataResolver) {
-        waitingForDataResolver();
-        waitingForDataResolver = null;
-      }
-    };
-
-    stream.on('data', onData);
-    stream.on('end', onEnd);
-    stream.on('error', onError);
-
-    try {
-      while (true) {
-        if (streamError) throw streamError;
-
-        if (!dataBuffer.isEmpty) {
-          // If buffer was full and now has room, resume the stream
-          if (backpressureApplied && dataBuffer.size < bufferSize * 0.5) {
-            backpressureApplied = false;
-            stream.resume();
-          }
-
-          yield dataBuffer.shift()!;
-        } else if (streamEnded) {
-          return;
-        } else {
-          await new Promise<void>((resolve, reject) => {
-            if (streamError) return reject(streamError);
-            if (streamEnded || !dataBuffer.isEmpty) return resolve();
-            waitingForDataResolver = resolve;
-          });
-        }
-      }
-    } finally {
-      // Cleanup listeners and destroy stream if not already ended/destroyed
-      stream.off('data', onData);
-      stream.off('end', onEnd);
-      stream.off('error', onError);
-
-      if (!stream.destroyed && !stream.readableEnded) {
-        stream.destroy();
-      }
-
-      // Clear buffer to help GC
-      dataBuffer.clear();
-    }
+  /** Yield rows with the stream's built-in backpressure and cancellation behavior. */
+  private async *_yieldFromStream(stream: Readable): AsyncGenerator<OutType, void, undefined> {
+    for await (const row of stream) yield row as OutType;
   }
 
   /**

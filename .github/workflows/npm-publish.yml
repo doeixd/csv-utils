@@ -12,28 +12,44 @@ jobs:
       contents: write
       packages: write
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # This is important for getting all tags
 
       - name: Setup Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify release version
+        run: node -e 'const v = require("./package.json").version; if (process.env.GITHUB_REF_NAME !== `v${v}`) { console.error(`Tag ${process.env.GITHUB_REF_NAME} does not match package version ${v}`); process.exit(1); }'
+
+      - name: Test
+        run: npm test
+
+      - name: Check public types
+        run: npm run test:types
+
       - name: Build
         run: npm run build
+
+      - name: Verify package entry points
+        run: |
+          npm run test:package
+          npx --yes --package=node@16 node scripts/smoke-package.cjs
+          npx --yes --package=node@16 node --conditions=development scripts/smoke-package.cjs
 
       - name: Find built files
         id: find_files
         run: |
-          CJS_FILE=$(find dist -name "*.cjs.js" -or -name "index.js" -or -name "index.jsx" | grep "/cjs/" | head -n 1)
-          ESM_FILE=$(find dist -name "*.esm.js" -or -name "index.js" -or -name "index.jsx" | grep "/esm/" | head -n 1)
-          TYPES_FILE=$(find dist -name "index.d.ts" | head -n 1)
+          CJS_FILE=dist/cjs/production/index.js
+          ESM_FILE=dist/esm/production/index.js
+          TYPES_FILE=dist/types/index.d.ts
+          test -f "$CJS_FILE" && test -f "$ESM_FILE" && test -f "$TYPES_FILE"
           
           echo "CJS file: $CJS_FILE"
           echo "ESM file: $ESM_FILE"
@@ -43,20 +59,14 @@ jobs:
           echo "esm_file=$ESM_FILE" >> $GITHUB_OUTPUT
           echo "types_file=$TYPES_FILE" >> $GITHUB_OUTPUT
 
+      - name: Get Changelog Entry
+        id: get_changelog
+        run: node scripts/release-notes.cjs "$GITHUB_REF_NAME"
+
       - name: Publish to npm
         run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Get Changelog Entry
-        id: get_changelog
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/}
-          CHANGELOG_ENTRY=$(awk "/^## \[$VERSION\]/ {flag=1;next} /^## \[/ {flag=0} flag" CHANGELOG.md)
-          CHANGELOG_ENTRY="${CHANGELOG_ENTRY//'%'/'%25'}"
-          CHANGELOG_ENTRY="${CHANGELOG_ENTRY//$'\n'/'%0A'}"
-          CHANGELOG_ENTRY="${CHANGELOG_ENTRY//$'\r'/'%0D'}"
-          echo "changelog=$CHANGELOG_ENTRY" >> $GITHUB_OUTPUT
 
       - name: Create Release
         id: create_release
@@ -64,10 +74,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
-          body: |
-            ${{ steps.get_changelog.outputs.changelog }}
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
+          body: ${{ steps.get_changelog.outputs.changelog }}
           draft: false
           prerelease: false
 

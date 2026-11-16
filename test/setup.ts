@@ -1,4 +1,4 @@
-import { vi } from 'vitest';
+import { vi } from 'vite-plus/test';
 
 // Define any global mock configuration here
 // Note: fs is not mocked globally anymore - individual tests mock it as needed

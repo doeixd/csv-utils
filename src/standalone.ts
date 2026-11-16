@@ -15,9 +15,18 @@ import CSV, {
   AggregateOperation,
   SimilarityMatch,
   CSVArrayUtils,
-  CSVSchemaConfig
+  CSVSchemaConfig,
+  JoinedRow,
+  ColumnUpdate,
+  RenamedColumn,
+  ColumnCastTarget,
+  CastColumn,
+  FilledColumn,
+  TextColumn,
+  TextColumns
 } from './index';
 import { stringify as stringifyCSV } from 'csv/sync';
+import os from 'node:os';
 
 /**
  * Adds a new column to each row in the data array.
@@ -54,7 +63,7 @@ export function addColumn<
   data: T[],
   columnName: NewKey,
   valueOrFn: NewValue | ((row: T) => NewValue)
-): Array<T & Record<NewKey, NewValue>> {
+): Array<ColumnUpdate<T, NewKey, NewValue>> {
   return CSV.fromData(data).addColumn(columnName, valueOrFn).toArray();
 }
 
@@ -116,13 +125,13 @@ export function removeColumn<
  */
 export function renameColumn<
   T extends Record<string, any>,
-  OldK extends keyof T | string,
+  OldK extends string,
   NewK extends string
 >(
   data: T[],
   oldName: OldK,
   newName: NewK
-): Array<Omit<T, Extract<OldK, keyof T>> & Record<NewK, OldK extends keyof T ? T[OldK] : any>> {
+): Array<RenamedColumn<T, OldK, NewK>> {
   return CSV.fromData(data).renameColumn(oldName, newName).toArray();
 }
 
@@ -156,8 +165,7 @@ export function reorderColumns<T extends Record<string, any>>(
 /**
  * Attempts to cast the values in a specified column to a given data type.
  * If casting fails for a value (e.g., 'abc' to number), it becomes `null`.
- * The generic type `T` of the array objects does not change in the function signature
- * due to runtime casting limitations, but the underlying data's types will change.
+ * The return type reflects the cast value type.
  *
  * @template T - The type of objects in the input array.
  * @param data - Array of objects to modify.
@@ -172,25 +180,21 @@ export function reorderColumns<T extends Record<string, any>>(
  * //   { id: '2', price: ' N/A ', available: '0' }
  * // ];
  *
- * let castedProducts = castColumnType(products, 'id', 'number');
- * castedProducts = castColumnType(castedProducts, 'price', 'number');
- * castedProducts = castColumnType(castedProducts, 'available', 'boolean');
+ * const withId = castColumnType(products, 'id', 'number');
+ * const withPrice = castColumnType(withId, 'price', 'number');
+ * const castedProducts = castColumnType(withPrice, 'available', 'boolean');
  * // castedProducts might be:
  * // [
  * //   { id: 1, price: 19.99, available: true },
- * //   { id: '2', price: null, available: false }
- * // ] (Note: id for 2nd product became '2' due to Product interface, but underlying cast was attempted)
- * // Actual type of castedProducts elements at runtime will differ from Product interface.
+ * //   { id: 2, price: null, available: false }
+ * // ]
  * ```
  */
-export function castColumnType<T extends Record<string, any>>(
+export function castColumnType<T extends Record<string, any>, K extends string, C extends ColumnCastTarget>(
   data: T[],
-  columnName: keyof T | string,
-  targetType: 'string' | 'number' | 'boolean' | 'date'
-): T[] {
-  // The CSV class method returns CSV<T>, so the generic T is preserved.
-  // When calling toArray(), it becomes T[], which is accurate for the structure,
-  // but the runtime types of values within the objects will have changed.
+  columnName: K,
+  targetType: C
+): CastColumn<T, K, C>[] {
   return CSV.fromData(data).castColumnType(columnName, targetType).toArray();
 }
 
@@ -292,7 +296,7 @@ export function split<T extends Record<string, any>>(
 export function join<
   T extends Record<string, any>,
   OtherRowType extends Record<string, any>,
-  JoinedRowType extends Record<string, any> = T & Partial<OtherRowType>
+  JoinedRowType extends Record<string, any> = JoinedRow<T, OtherRowType>
 >(
   dataLeft: T[],
   dataRight: OtherRowType[],
@@ -357,7 +361,7 @@ export function unpivot<
   valueName: ValueNameCol = 'value' as ValueNameCol
 ): Array<
   Pick<T, IdKeys> &
-  Record<VarNameCol, ValueKeys extends string ? ValueKeys : string> &
+  Record<VarNameCol, ValueKeys> &
   Record<ValueNameCol, T[ValueKeys]>
 > {
   return CSV.fromData(data)
@@ -385,11 +389,11 @@ export function unpivot<
  * // filledProducts: [{ name: 'Apple', price: 1.0 }, { name: 'Banana', price: 0 }]
  * ```
  */
-export function fillMissingValues<T extends Record<string, any>, K extends keyof T>(
+export function fillMissingValues<T extends Record<string, any>, K extends keyof T, V>(
   data: T[],
   columnName: K,
-  valueOrFn: T[K] | any | ((row: T) => T[K] | any)
-): T[] {
+  valueOrFn: V | ((row: T) => V)
+): FilledColumn<T, K, V>[] {
   return CSV.fromData(data).fillMissingValues(columnName, valueOrFn).toArray();
 }
 
@@ -418,7 +422,7 @@ export function normalizeText<T extends Record<string, any>, K extends keyof T>(
   data: T[],
   columnName: K,
   normalizationType: 'lowercase' | 'uppercase' | 'capitalize'
-): T[] {
+): TextColumn<T, K>[] {
   return CSV.fromData(data).normalizeText(columnName, normalizationType).toArray();
 }
 
@@ -446,7 +450,7 @@ export function normalizeText<T extends Record<string, any>, K extends keyof T>(
 export function trimWhitespace<T extends Record<string, any>>(
   data: T[],
   columns?: (keyof T | string)[]
-): T[] {
+): TextColumns<T>[] {
   return CSV.fromData(data).trimWhitespace(columns).toArray();
 }
 
@@ -817,7 +821,7 @@ export function merge<T extends Record<string, any>, E extends Record<string, an
   dataB: E[],
   equalityFn: EqualityCallback<T | E>,
   mergeFn: MergeCallback<T, E>
-): T[] {
+): (T | E)[] {
   return CSV.fromData(dataA).mergeWith(dataB, equalityFn, mergeFn).toArray();
 }
 
@@ -883,10 +887,10 @@ export function tail<T extends Record<string, any>>(
  * const template = getBaseRow(products, { inStock: true });
  * ```
  */
-export function getBaseRow<T extends Record<string, any>, R extends { [K in keyof T]?: any } = { [K in keyof T]?: undefined }>(
+export function getBaseRow<T extends Record<string, any>>(
   data: T[],
   defaults?: Partial<T>
-): R {
+): Partial<T> {
   if (data.length === 0) {
     throw new CSVError('Cannot create base row from empty data');
   }
@@ -910,7 +914,7 @@ export function getBaseRow<T extends Record<string, any>, R extends { [K in keyo
 export function createRow<T extends Record<string, any>>(
   data: T[],
   rowData: Partial<T> = {}
-): T {
+): Partial<T> {
   return CSV.fromData(data).createRow(rowData);
 }
 
@@ -1105,35 +1109,7 @@ export async function forEachAsync<T extends Record<string, any>>(
   callback: (row: T, index: number) => Promise<void>,
   options: { batchSize?: number; batchConcurrency?: number } = {}
 ): Promise<void> {
-  const batchSize = options.batchSize || 1;
-  const batchConcurrency = options.batchConcurrency || 1;
-  
-  if (batchSize <= 1 && batchConcurrency <= 1) {
-    // Original sequential processing
-    for (let i = 0; i < data.length; i++) {
-      await callback(data[i], i);
-    }
-    return;
-  }
-  
-  // Process data in batches with concurrency
-  const batches: T[][] = [];
-  for (let i = 0; i < data.length; i += batchSize) {
-    batches.push(data.slice(i, i + batchSize));
-  }
-  
-  // Process batches with controlled concurrency
-  for (let i = 0; i < batches.length; i += batchConcurrency) {
-    const batchPromises = batches.slice(i, i + batchConcurrency).map(async (batch, batchIndex) => {
-      const startIdx = i * batchSize + batchIndex * batchSize;
-      const promises = batch.map((row, rowIndex) => 
-        callback(row, startIdx + rowIndex)
-      );
-      await Promise.all(promises);
-    });
-    
-    await Promise.all(batchPromises);
-  }
+  return CSV.fromData(data).forEachAsync(callback, options);
 }
 
 /**
@@ -1159,7 +1135,8 @@ export async function mapAsync<T extends Record<string, any>, R>(
   options?: { batchSize?: number }
 ): Promise<R[]> {
   const result: R[] = [];
-  const batchSize = options?.batchSize || 50;
+  const batchSize = options?.batchSize ?? 50;
+  if (!Number.isSafeInteger(batchSize) || batchSize <= 0) throw new CSVError('batchSize must be a positive integer');
   
   for (let i = 0; i < data.length; i += batchSize) {
     const batch = data.slice(i, i + batchSize);
@@ -1197,46 +1174,7 @@ export async function reduceAsync<T extends Record<string, any>, R>(
   initialValue: R,
   options?: { strategy?: 'sequential' | 'mapreduce', batchSize?: number }
 ): Promise<R> {
-  const strategy = options?.strategy || 'sequential';
-  const batchSize = options?.batchSize || 100;
-  
-  if (strategy === 'sequential') {
-    // Simple sequential reduction
-    let accumulator = initialValue;
-    
-    for (let i = 0; i < data.length; i++) {
-      accumulator = await reducer(accumulator, data[i], i);
-    }
-    
-    return accumulator;
-  } else {
-    // Map-reduce strategy for better parallelism
-    // First map: Process items in batches
-    const batches = [];
-    for (let i = 0; i < data.length; i += batchSize) {
-      batches.push(data.slice(i, i + batchSize));
-    }
-    
-    // Process each batch in parallel with its own accumulator
-    const batchResults = await Promise.all(
-      batches.map(async (batch, batchIndex) => {
-        let batchAccumulator = initialValue;
-        for (let i = 0; i < batch.length; i++) {
-          const index = batchIndex * batchSize + i;
-          batchAccumulator = await reducer(batchAccumulator, batch[i], index);
-        }
-        return batchAccumulator;
-      })
-    );
-    
-    // Then reduce: Combine batch results
-    let finalResult = initialValue;
-    for (const result of batchResults) {
-      finalResult = await reducer(finalResult, result as unknown as T, -1);
-    }
-    
-    return finalResult;
-  }
+  return CSV.fromData(data).reduceAsync(reducer, initialValue, options);
 }
 
 /**
@@ -1279,7 +1217,7 @@ export async function sortByAsync<T extends Record<string, any>, K extends keyof
   
   // Perform parallel sorting with merge
   try {
-    const cpuCount = require('os').cpus().length;
+    const cpuCount = os.cpus().length;
     const workerCount = Math.min(cpuCount, 4); // Limit to 4 workers max
     
     // Split into chunks for parallel processing

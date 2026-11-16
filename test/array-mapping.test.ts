@@ -1,5 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vite-plus/test';
 import fs from 'fs';
 import { HeaderMap, createHeaderMapFns, CsvToArrayConfig, ObjectArrayToCsvConfig } from '../src/headers';
 import CSV, { CSVError } from '../src';

@@ -1,9 +1,11 @@
 {
   "name": "@doeixd/csv-utils",
-  "version": "2.3.4",
+  "version": "3.0.0",
   "files": [
     "dist",
-    "src"
+    "src",
+    "docs",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=16"
@@ -85,32 +87,37 @@
     "pridepack"
   ],
   "devDependencies": {
-    "@types/node": "^22.10.2",
     "pridepack": "2.6.4",
     "standard-version": "^9.5.0",
-    "tslib": "^2.8.1",
-    "typescript": "^5.7.2",
-    "vitest": "^2.1.8",
-    "zod": "^3.24.4"
+    "tslib": "^2.9.1",
+    "typescript": "^5.9.3",
+    "vite-plus": "^1.6.0",
+    "vitest": "^5.1.0",
+    "zod": "^4.6.7"
   },
   "scripts": {
     "release": "standard-version && git push --follow-tags origin main",
     "release:patch": "npm version patch && git push --follow-tags origin main",
     "release:minor": "npm version minor && git push --follow-tags origin main",
     "release:major": "npm version major && git push --follow-tags origin main",
-    "prepublishOnly": "pridepack clean && pridepack build",
+    "prepublishOnly": "npm test && npm run test:types && npm run clean",
     "build": "pridepack build",
     "type-check": "pridepack check",
     "clean": "pridepack clean",
     "watch": "pridepack watch",
     "start": "pridepack start",
     "dev": "pridepack dev",
-    "test": "vitest --run"
+    "test": "vitest --run",
+    "test:types": "tsc --noEmit --strict --skipLibCheck --target es2020 --module esnext --moduleResolution bundler --types node --esModuleInterop test/public-types.test-d.ts",
+    "postbuild": "node scripts/write-esm-package.cjs",
+    "test:package": "node scripts/smoke-package.cjs && node --conditions=development scripts/smoke-package.cjs && npm run test:package:types",
+    "prepack": "npm run build && npm run test:package",
+    "test:package:types": "tsc --noEmit --strict --target es2020 --module nodenext --moduleResolution nodenext --types node --esModuleInterop test/package-consumer.mts test/package-consumer.cts && tsc --noEmit --strict --target es2020 --module nodenext --moduleResolution nodenext --types node --esModuleInterop --customConditions development test/package-consumer.mts test/package-consumer.cts"
   },
   "private": false,
   "description": "Utilities for csv files / arrays of objects",
   "repository": {
-    "url": "https://github.com/doeixd/csv-utils.git",
+    "url": "git+https://github.com/doeixd/csv-utils.git",
     "type": "git"
   },
   "homepage": "https://github.com/doeixd/csv-utils#readme",
@@ -122,7 +129,9 @@
     "access": "public"
   },
   "dependencies": {
-    "csv": "^6.4.1",
+    "@types/node": "^22.20.5",
+    "csv": "^6.6.4",
+    "csv-parse": "^7.0.3",
     "fastest-levenshtein": "^1.0.16"
   },
   "types": "./dist/types/index.d.ts",
@@ -130,31 +139,64 @@
   "module": "./dist/esm/production/index.js",
   "exports": {
     ".": {
-      "types": "./dist/types/index.d.ts",
       "development": {
-        "require": "./dist/cjs/development/index.js",
-        "import": "./dist/esm/development/index.js"
+        "import": {
+          "types": "./dist/types/esm/index.d.ts",
+          "default": "./dist/esm/development/index.js"
+        },
+        "require": {
+          "types": "./dist/types/index.d.ts",
+          "default": "./dist/cjs/development/index.js"
+        }
       },
-      "require": "./dist/cjs/production/index.js",
-      "import": "./dist/esm/production/index.js"
+      "import": {
+        "types": "./dist/types/esm/index.d.ts",
+        "default": "./dist/esm/production/index.js"
+      },
+      "require": {
+        "types": "./dist/types/index.d.ts",
+        "default": "./dist/cjs/production/index.js"
+      }
     },
     "./headers": {
-      "types": "./dist/types/headers.d.ts",
       "development": {
-        "require": "./dist/cjs/development/headers.js",
-        "import": "./dist/esm/development/headers.js"
+        "import": {
+          "types": "./dist/types/esm/headers.d.ts",
+          "default": "./dist/esm/development/headers.js"
+        },
+        "require": {
+          "types": "./dist/types/headers.d.ts",
+          "default": "./dist/cjs/development/headers.js"
+        }
       },
-      "require": "./dist/cjs/production/headers.js",
-      "import": "./dist/esm/production/headers.js"
+      "import": {
+        "types": "./dist/types/esm/headers.d.ts",
+        "default": "./dist/esm/production/headers.js"
+      },
+      "require": {
+        "types": "./dist/types/headers.d.ts",
+        "default": "./dist/cjs/production/headers.js"
+      }
     },
     "./standalone": {
-      "types": "./dist/types/standalone.d.ts",
       "development": {
-        "require": "./dist/cjs/development/standalone.js",
-        "import": "./dist/esm/development/standalone.js"
+        "import": {
+          "types": "./dist/types/esm/standalone.d.ts",
+          "default": "./dist/esm/development/standalone.js"
+        },
+        "require": {
+          "types": "./dist/types/standalone.d.ts",
+          "default": "./dist/cjs/development/standalone.js"
+        }
       },
-      "require": "./dist/cjs/production/standalone.js",
-      "import": "./dist/esm/production/standalone.js"
+      "import": {
+        "types": "./dist/types/esm/standalone.d.ts",
+        "default": "./dist/esm/production/standalone.js"
+      },
+      "require": {
+        "types": "./dist/types/standalone.d.ts",
+        "default": "./dist/cjs/production/standalone.js"
+      }
     }
   },
   "typesVersions": {

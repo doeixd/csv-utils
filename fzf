@@ -1,7 +1,0 @@
-test\
-test\array-mapping.test.ts
-test\custom-casting.test.ts
-test\index.test.ts
-test\schema-validation.test.ts
-test-temp\
-vitest.config.ts

@@ -73,6 +73,7 @@ export interface ObjectArrayToCsvConfig {
  */
 export type HeaderMapValue<T = any> =
   | Path                   // Direct path like 'profile.name'
+  | number                 // Destination index for object-to-array mappings
   | HeaderMapFn<T>            // Custom mapping function
   | CsvToArrayConfig       // CSV columns -> object array property configuration
   | ObjectArrayToCsvConfig;   // Object array property -> CSV columns configuration
@@ -166,37 +167,12 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
     }
   };
 
-  // Create inverse map for toRowArr
-  const inverseMap: HeaderMap<any> = {};
-  for (const [key, value] of Object.entries(headerMap)) {
-    if (typeof value === 'string') {
-      inverseMap[value] = (isNaN(Number(key)) ? key : Number(key)) as any;
-    }
-  }
-
   // Helper function to ensure array exists at path
   const ensureArrayAtPath = (obj: any, path: string): any[] => {
-    let current = obj;
-    const parts = path.split('.');
-
-    // Navigate to the parent object
-    for (let i = 0; i < parts.length - 1; i++) {
-      if (!current[parts[i]]) {
-        current[parts[i]] = {};
-      }
-      current = current[parts[i]];
-    }
-
-    // Create array if it doesn't exist
-    const lastPart = parts[parts.length - 1];
-    if (!current[lastPart]) {
-      current[lastPart] = [];
-    } else if (!Array.isArray(current[lastPart])) {
-      // Convert to array if not already one
-      current[lastPart] = [current[lastPart]];
-    }
-
-    return current[lastPart] as any[];
+    const value = getPathValue(obj, path);
+    const array = Array.isArray(value) ? value : value == null ? [] : [value];
+    setPathValue(obj, path, array);
+    return array;
   };
 
   // Validate once during creation
@@ -214,12 +190,13 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
      * // user = { id: '123', profile: { firstName: 'John', lastName: 'Doe' } }
      * ```
      */
-    fromRowArr: (rowArr: RowArr | Record<string, any>, allHeaders?: string[]): To & Record<string, any> => {
+    fromRowArr: (rowArr: RowArr | Record<string, any>, allHeaders?: string[]): To => {
       const to = {} as To & Record<string, any>;
       const handledCsvHeaders = new Set<string | number>();
 
       // Determine if header map uses string keys
-      const hasStringKeys = Object.keys(headerMap).some(k => isNaN(Number(k)));
+      const mapKeys = Object.keys(headerMap);
+      const hasStringKeys = mapKeys.some(k => isNaN(Number(k)));
 
       // Convert array to object if needed and provide headers
       let rowObj: Record<string, any>;
@@ -227,7 +204,7 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
         // If we're dealing with a header-based mapping but have array data,
         // convert the array to an object using header names
         if (hasStringKeys && allHeaders) {
-          rowObj = {};
+          rowObj = Object.create(null);
           for (let i = 0; i < rowArr.length && i < allHeaders.length; i++) {
             rowObj[allHeaders[i]] = rowArr[i];
           }
@@ -242,7 +219,7 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
       }
       
       // Process CsvToArrayConfig rules first to collect columns into arrays
-      for (const ruleName in headerMap) {
+      for (const ruleName of mapKeys) {
         const rule = headerMap[ruleName];
         
         // Check if rule is a CsvToArrayConfig
@@ -272,7 +249,8 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
               matches = matchResult !== null;
             } else if (arrayRule.sourceCsvColumns) {
               // Explicit list-based matching
-              matches = arrayRule.sourceCsvColumns.includes(String(sourceHeader));
+              // headersToScan is already the explicit list in this branch.
+              matches = true;
             }
             
             if (matches) {
@@ -309,7 +287,7 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
           }
           
           // Sort the collected items if needed
-          if (collectedItems.length > 0 && 'sortKey' in collectedItems[0]) {
+          if (collectedItems.length > 0 && arrayRule.sourceCsvColumnPattern && arrayRule.sortSourceColumnsBy) {
             collectedItems.sort((a, b) => {
               if (a.sortKey! < b.sortKey!) return -1;
               if (a.sortKey! > b.sortKey!) return 1;
@@ -341,6 +319,7 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
           return;
         }
         
+        if (!Object.prototype.hasOwnProperty.call(headerMap, sourceKey)) return;
         const mapping = headerMap[sourceKey];
         if (!mapping) {
           return; // No mapping for this key
@@ -370,7 +349,7 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
         }
       }
       
-      return to as To & Record<string, any>;
+      return to as To;
     },
 
     /**
@@ -397,22 +376,22 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
       }
       
       const row: any[] = [];
-      const rowObj: Record<string, any> = {};
-      const handledPaths = new Set<string>();
-      
+      const rowObj: Record<string, any> = Object.create(null);
       // Determine if mapping is index-based
-      const isIndexBased = Object.keys(headerMap).every(k => !isNaN(Number(k)));
+      const mapKeys = Object.keys(headerMap);
+      const isIndexBased = mapKeys.every(k => !isNaN(Number(k)));
       
       // Process array-to-csv mappings first (using original headerMap)
-      for (const objectPath in headerMap) {
+      for (const objectPath of mapKeys) {
         const mappingRule = headerMap[objectPath];
 
         // Handle array-to-csv mappings
         if (typeof mappingRule === 'object' && mappingRule !== null && (mappingRule as any)._type === 'targetArrayToCsv') {
           const arrayRule = mappingRule as ObjectArrayToCsvConfig;
-          const sourceArray = getPathValue(objAfterMapWasApplied, objectPath);
+          const valueAtPath = getPathValue(objAfterMapWasApplied, objectPath);
+          const sourceArray = Array.isArray(valueAtPath) ? valueAtPath : [];
 
-          if (Array.isArray(sourceArray)) {
+          {
             if (arrayRule.targetCsvColumns) {
               // Fixed column names
               for (let i = 0; i < arrayRule.targetCsvColumns.length; i++) {
@@ -434,13 +413,16 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
               }
             } else if (arrayRule.targetCsvColumnPrefix) {
               // Dynamic column names with prefix
-              const limit = arrayRule.maxColumns !== undefined
-                ? Math.min(arrayRule.maxColumns, sourceArray.length)
-                : sourceArray.length;
+              const prefix = arrayRule.targetCsvColumnPrefix;
+              const names = headers.length ? headers : Array.from({ length: arrayRule.maxColumns !== undefined
+                ? Math.min(arrayRule.maxColumns, sourceArray.length) : sourceArray.length }, (_, i) => `${prefix}${i + 1}`);
 
-              for (let i = 0; i < limit; i++) {
-                const csvColName = `${arrayRule.targetCsvColumnPrefix}${i + 1}`;
-                const value = sourceArray[i];
+              for (const csvColName of names) {
+                if (!csvColName.startsWith(prefix)) continue;
+                const suffix = csvColName.slice(prefix.length);
+                const index = Number(suffix);
+                if (!/^[1-9]\d*$/.test(suffix) || !Number.isSafeInteger(index) || (arrayRule.maxColumns !== undefined && index > arrayRule.maxColumns)) continue;
+                const value = sourceArray[index - 1];
                 const outputValue = value ?? arrayRule.emptyCellOutput ?? '';
 
                 if (isIndexBased) {
@@ -457,7 +439,6 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
               }
             }
 
-            handledPaths.add(objectPath);
           }
 
           continue;
@@ -465,7 +446,7 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
       }
 
       // Process standard mappings
-      for (const objectPath in headerMap) {
+      for (const objectPath of mapKeys) {
         const mappingRule = headerMap[objectPath];
 
         // Skip array mappings (already handled above)
@@ -494,7 +475,6 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
             }
           }
 
-          handledPaths.add(objectPath);
         } else if (typeof mappingRule === 'number') {
           // This shouldn't happen for standard mappings, but handle just in case
           let value = getPathValue(objAfterMapWasApplied, objectPath);
@@ -502,7 +482,6 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
             value = processValueForOutput(value, objectPath, transformFn);
             row[mappingRule] = value;
           }
-          handledPaths.add(objectPath);
         } else if (typeof mappingRule === 'function') {
           // Function mapping
           if (isIndexBased) {
@@ -513,14 +492,13 @@ export function createHeaderMapFns<To, RowArr extends any[] = any[]>(
             (mappingRule as HeaderMapFn<any>)(rowObj, objAfterMapWasApplied, objectPath, headers);
           }
           
-          handledPaths.add(objectPath);
         }
       }
       
       // For header-based output, convert the object to an array
       if (!isIndexBased) {
         if (!headers || headers.length === 0) {
-          headers = Object.keys(headerMap);
+          headers = mapKeys;
         }
 
         for (let i = 0; i < headers.length; i++) {
@@ -566,7 +544,7 @@ function processValueForOutput(
  * @returns Object with header names as keys
  */
 function arrayRowToObjectRow(row: any[], headerRow: string[]): Record<string, any> {
-  const objRow: Record<string, any> = {};
+  const objRow: Record<string, any> = Object.create(null);
   for (let i = 0; i < row.length && i < headerRow.length; i++) {
     objRow[headerRow[i]] = row[i];
   }
@@ -632,10 +610,10 @@ export function arrayToObjArray<T>(
   // Check if we need to validate header row
   validateHeadersIfNeeded(data, headerMap, headerRow);
   
+  const hasStringKeys = Object.keys(headerMap).some(k => isNaN(Number(k)));
   return data.map(row => {
     // If working with arrays and string header maps, convert to object first
     const isArrayData = Array.isArray(row);
-    const hasStringKeys = Object.keys(headerMap).some(k => isNaN(Number(k)));
     
     if (isArrayData && hasStringKeys && headerRow) {
       const objRow = arrayRowToObjectRow(row, headerRow);
@@ -710,17 +688,48 @@ export function objArrayToArray<T>(
     return includeHeaders && headers.length > 0 ? [headers] : [];
   }
   
-  // Create an inverse header map
-  const inverseMap: HeaderMap<T> = {};
-  for (const [key, value] of Object.entries(headerMap)) {
-    if (typeof value === 'string' || typeof value === 'number') {
-      inverseMap[value] = key;
+  const rules: HeaderMap<T> = Object.create(null);
+  const scalars: Array<[string, string | number]> = [];
+  const generatedHeaders: string[] = [];
+  for (const [path, rule] of Object.entries(headerMap)) {
+    if (typeof rule === 'string' || typeof rule === 'number') {
+      scalars.push([path, rule]);
+      if (typeof rule === 'string' && !headers.length) generatedHeaders.push(rule);
+    } else {
+      rules[path] = rule;
+      if (!headers.length && rule && typeof rule === 'object' && rule._type === 'targetArrayToCsv') {
+        if (rule.targetCsvColumns) generatedHeaders.push(...rule.targetCsvColumns);
+        else if (rule.targetCsvColumnPrefix) {
+          const length = data.reduce((max, row) => {
+            const value = getPathValue(row, path);
+            return Array.isArray(value) ? Math.max(max, value.length) : max;
+          }, 0);
+          const limit = rule.maxColumns === undefined ? length : Math.min(length, rule.maxColumns);
+          for (let i = 1; i <= limit; i++) generatedHeaders.push(`${rule.targetCsvColumnPrefix}${i}`);
+        }
+      }
     }
   }
-  
-  const { toRowArr } = createHeaderMapFns<T>(inverseMap);
-  
-  const rows = data.map(obj => toRowArr(obj, headers, transformFn));
+  const outputHeaders = headers.length ? headers : generatedHeaders;
+  const headerPositions = new Map<string, number[]>();
+  outputHeaders.forEach((header, index) => {
+    const positions = headerPositions.get(header);
+    if (positions) positions.push(index);
+    else headerPositions.set(header, [index]);
+  });
+  const ruleMapper = Object.keys(rules).length ? createHeaderMapFns<T>(rules) : undefined;
+  if (!ruleMapper && !scalars.length) createHeaderMapFns<T>(headerMap);
+  const rows = data.map(obj => {
+    const row: any[] = ruleMapper ? ruleMapper.toRowArr(obj, outputHeaders, transformFn) : outputHeaders.map(() => '');
+    for (const [path, target] of scalars) {
+      const value = getPathValue(obj, path);
+      if (value === undefined) continue;
+      const output = processValueForOutput(value, String(target), transformFn);
+      if (typeof target === 'number') row[target] = output;
+      else for (const index of headerPositions.get(target) ?? []) row[index] = output;
+    }
+    return row;
+  });
   
   if (includeHeaders && headers.length > 0) {
     return [headers, ...rows];
@@ -762,8 +771,8 @@ export function groupByField<T>(
 ): Record<string, (T & Record<string, any>)[]> {
   return data.reduce((groups, item) => {
     const key = String(getPathValue(item, field) ?? 'undefined');
-    if (!groups[key]) {
-      groups[key] = [];
+    if (!Object.prototype.hasOwnProperty.call(groups, key)) {
+      Object.defineProperty(groups, key, { value: [], enumerable: true, writable: true, configurable: true });
     }
     groups[key].push(item);
     return groups;

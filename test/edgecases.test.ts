@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vite-plus/test';
 import fs from 'fs';
 import CSV, { StandardSchemaV1 } from '../src';
 import { createHeaderMapFns, HeaderMap, CsvToArrayConfig } from '../src/headers';

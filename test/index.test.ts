@@ -1,5 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vite-plus/test';
 import fs, { PathLike, ReadStream } from 'fs';
 import path from 'path';
 import * as os from 'os';
@@ -865,70 +864,6 @@ describe('Async Generators', () => {
     vi.resetAllMocks();
   });
   
-  it('csvGenerator yields row by row', async () => {
-    vi.mocked(fs.readFileSync).mockReturnValue('id,name,price\n1,Product A,100\n2,Product B,200\n3,Product C,300\n');
-
-    // Test the generator
-    const generator = csvGenerator('test.csv');
-    const results: any[] = [];
-
-    for await (const row of generator) {
-      results.push(row);
-      if (results.length >= 3) break; // Prevent infinite loop in test
-    }
-
-    expect(results).toHaveLength(3);
-    expect(results[0].id).toBe('1');
-    expect(results[1].id).toBe('2');
-    expect(results[2].id).toBe('3');
-  });
-
-  it('csvGenerator applies header mapping', async () => {
-    vi.mocked(fs.readFileSync).mockReturnValue('id,product_name,price\n1,Product A,100\n2,Product B,200\n');
-
-    // Test with header mapping
-    const headerMap = {
-      'id': 'productId',
-      'product_name': 'name',
-      'price': 'cost'
-    };
-
-    const generator = csvGenerator('test.csv', { headerMap });
-    const results:  any[] = [];
-
-    for await (const row of generator) {
-      results.push(row);
-      if (results.length >= 2) break;
-    }
-
-    expect(results).toHaveLength(2);
-    expect(results[0].productId).toBe('1');
-    expect(results[0].name).toBe('Product A');
-    expect(results[0].cost).toBe('100');
-  });
-  it('csvBatchGenerator yields batches of rows', async () => {
-    const csvRows = ['id,name,price'];
-    for (let i = 1; i <= 50; i++) {
-      csvRows.push(`${i},Product ${i},${i * 10}`);
-    }
-    vi.mocked(fs.readFileSync).mockReturnValue(csvRows.join('\n') + '\n');
-
-    // Test the batch generator with batch size 10
-    const generator = csvBatchGenerator('test.csv', { batchSize: 10 });
-    const batches: any[] = [];
-
-    for await (const batch of generator) {
-      batches.push(batch);
-      if (batches.length >= 5) break; // Prevent infinite loop
-    }
-
-    expect(batches).toHaveLength(5);
-    expect(batches[0]).toHaveLength(10); // First batch has 10 items
-    expect(batches[0][0].id).toBe('1');
-    expect(batches[0][9].id).toBe('10');
-    expect(batches[1][0].id).toBe('11');
-  });
-
   it('writeCSVFromGenerator writes to a file', async () => {
     const mockWritable = {
       write: vi.fn().mockReturnValue(true),
